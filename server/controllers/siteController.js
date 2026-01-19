@@ -9,18 +9,18 @@ const { getSafePath } = require('../utils/helpers');
 // Helper to resolve DB Name from siteId or databaseId
 const getDbName = async (params) => {
     const { siteId, databaseId } = params;
-    
+
     if (databaseId) {
         const [dbs] = await pool.execute('SELECT db_name FROM `databases` WHERE id = ?', [databaseId]);
         return dbs.length ? dbs[0].db_name : null;
     }
-    
+
     if (siteId) {
         // Find database linked to this site
         const [dbs] = await pool.execute('SELECT db_name FROM `databases` WHERE site_id = ?', [siteId]);
         return dbs.length ? dbs[0].db_name : null;
     }
-    
+
     return null;
 };
 
@@ -55,15 +55,42 @@ exports.deploySite = async (req, res) => {
         if (!fs.existsSync(userDir)) fs.mkdirSync(userDir, { recursive: true });
         if (!fs.existsSync(siteDir)) fs.mkdirSync(siteDir, { recursive: true });
 
+        let sizeMB = 0;
+
         if (file) {
-            await extractZip(file.buffer, siteDir);
+            console.log(`[Deploy] 📦 Processing uploaded file: ${file.originalname}`);
+            console.log(`[Deploy] File path (disk): ${file.path}`);
+
+            // Stream-based extraction using file path (not buffer)
+            // file.path is set by multer diskStorage
+            const extractResult = await extractZip(file.path, siteDir);
+
+            if (!extractResult.success) {
+                // Clean up temp file on failure
+                try { fs.unlinkSync(file.path); } catch (e) { }
+                return res.status(400).json({
+                    message: extractResult.message,
+                    status: extractResult.status
+                });
+            }
+
+            // Use extracted size if available, otherwise file size
+            sizeMB = extractResult.stats?.totalMB
+                ? parseFloat(extractResult.stats.totalMB)
+                : (file.size / (1024 * 1024));
+
+            // Clean up temp file after successful extraction
+            try { fs.unlinkSync(file.path); } catch (e) {
+                console.warn(`[Deploy] Could not clean temp file: ${file.path}`);
+            }
+
+            console.log(`[Deploy] ✅ Extraction complete: ${extractResult.stats?.fileCount || 'unknown'} files, ${sizeMB.toFixed(2)}MB`);
         } else {
             fs.writeFileSync(path.join(siteDir, 'index.html'), `<h1>Welcome to ${name}</h1><p>Deployed via KolabPanel</p>`);
         }
 
         const siteId = `s_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
         const hasDb = needsDatabase === 'true';
-        const sizeMB = file ? (file.size / (1024 * 1024)) : 0;
 
         await pool.execute(
             `INSERT INTO sites (id, user_id, name, subdomain, framework, status, created_at, storage_used, has_database) 
@@ -84,21 +111,21 @@ exports.deploySite = async (req, res) => {
             try {
                 // 1. Create DB
                 await pool.query(`CREATE DATABASE IF NOT EXISTS \`${realDbName}\``);
-                
+
                 // 2. Ensure User Exists
                 await pool.query(`CREATE USER IF NOT EXISTS '${mysqlUser}'@'%' IDENTIFIED BY '${mysqlPass}'`);
 
                 // 3. Grant Privileges
                 await pool.query(`GRANT ALL PRIVILEGES ON \`${realDbName}\`.* TO '${mysqlUser}'@'%'`);
                 await pool.query('FLUSH PRIVILEGES');
-                
+
                 // 4. Register in 'databases' table (Backticks REQUIRED for reserved keyword 'databases')
                 const dbId = `db_${Date.now()}`;
                 await pool.execute(
                     'INSERT INTO `databases` (id, site_id, name, db_name) VALUES (?, ?, ?, ?)',
                     [dbId, siteId, name || realDbName, realDbName]
                 );
-                
+
                 // 5. Update site flag
                 await pool.execute('UPDATE sites SET has_database = TRUE WHERE id = ?', [siteId]);
 
@@ -108,9 +135,9 @@ exports.deploySite = async (req, res) => {
                 // Don't fail the whole request, but log error
             }
         } else if (attachedDatabaseId) {
-             // Link existing orphaned database
-             await pool.execute('UPDATE `databases` SET site_id = ? WHERE id = ?', [siteId, attachedDatabaseId]);
-             await pool.execute('UPDATE sites SET has_database = TRUE WHERE id = ?', [siteId]);
+            // Link existing orphaned database
+            await pool.execute('UPDATE `databases` SET site_id = ? WHERE id = ?', [siteId, attachedDatabaseId]);
+            await pool.execute('UPDATE sites SET has_database = TRUE WHERE id = ?', [siteId]);
         }
 
         res.json({ success: true, id: siteId, message: 'Deployed successfully' });
@@ -140,17 +167,17 @@ exports.updateSite = async (req, res) => {
 
 exports.deleteSite = async (req, res) => {
     const { siteId } = req.params;
-    const { deleteDb } = req.body; 
+    const { deleteDb } = req.body;
     try {
         const [sites] = await pool.execute('SELECT * FROM sites WHERE id = ?', [siteId]);
         if (sites.length === 0) return res.status(404).json({ message: 'Site not found' });
         const site = sites[0];
-        
+
         const pathInfo = await getSafePath(site.user_id, site.name, '/');
         if (pathInfo && fs.existsSync(pathInfo.siteDir)) {
             try {
                 fs.rmSync(pathInfo.siteDir, { recursive: true, force: true });
-            } catch(e) {}
+            } catch (e) { }
         }
 
         if (deleteDb) {
@@ -225,12 +252,12 @@ exports.dropDatabase = async (req, res) => {
     try {
         // 1. Get DB Info
         const [dbs] = await pool.execute('SELECT db_name FROM `databases` WHERE site_id = ?', [siteId]);
-        
+
         if (dbs.length > 0) {
             const dbName = dbs[0].db_name;
             // 2. Drop Actual MySQL Database
             await pool.query(`DROP DATABASE IF EXISTS \`${dbName}\``);
-            
+
             // 3. Remove from metadata table
             await pool.execute('DELETE FROM `databases` WHERE site_id = ?', [siteId]);
         }
@@ -265,7 +292,7 @@ exports.getDatabasetables = async (req, res) => {
     try {
         const dbName = await getDbName(req.params);
         if (!dbName) return res.status(404).json({ message: 'Database not found for this site' });
-        
+
         const [tables] = await pool.execute(`
             SELECT 
                 TABLE_NAME as name, 
@@ -365,7 +392,7 @@ exports.importDatabase = async (req, res) => {
         const dbName = await getDbName(req.params);
         console.log('[importDatabase] Found dbName:', dbName);
         if (!dbName) return res.status(404).json({ message: 'Database not found. Please create one first.' });
-        
+
         const sqlContent = file.buffer.toString('utf-8');
 
         const connection = await pool.getConnection();
@@ -394,7 +421,7 @@ exports.exportDatabase = async (req, res) => {
         // In a real app, we would spawn `mysqldump` here.
         // For now, we return a mock SQL file with basic structure.
         const sql = `-- KolabPanel Database Dump\n-- DB: ${dbName}\n-- Date: ${new Date().toISOString()}\n\n-- Mock Export: Real export requires mysqldump binary execution --`;
-        
+
         res.setHeader('Content-disposition', `attachment; filename=${dbName}.sql`);
         res.setHeader('Content-type', 'application/sql');
         res.send(sql);
