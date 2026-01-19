@@ -18,6 +18,22 @@ router.get('/auth/me', authController.getMe);
 router.put('/auth/profile', authController.updateProfile);
 router.post('/auth/change-password', authController.changePassword);
 
+// ============================================
+// EMAIL VERIFICATION ROUTES
+// ============================================
+// Route untuk verifikasi email (dipanggil dari link di email)
+// GET /api/auth/verify-email?token=xxxxx
+router.get('/auth/verify-email', authController.verifyEmail);
+
+// Route untuk kirim ulang email verifikasi
+// POST /api/auth/resend-verification
+// Body: { email: "user@example.com" }
+router.post('/auth/resend-verification', authController.resendVerification);
+
+// Route untuk cek status verifikasi email
+// GET /api/auth/check-verification/:userId
+router.get('/auth/check-verification/:userId', authController.checkVerificationStatus);
+
 // Database Routes (Specific Routes First)
 router.get('/sites/:siteId/db/tables', siteController.getDatabasetables);
 router.get('/sites/:siteId/db/schema', siteController.getDatabaseSchema); // NEW: Full Schema
@@ -33,13 +49,13 @@ router.post('/sites/deploy', upload.single('file'), siteController.deploySite);
 router.put('/sites/:siteId', siteController.updateSite);
 router.delete('/sites/:siteId', siteController.deleteSite);
 
-router.get('/debug/site/:siteId', async (req, res) => { 
+router.get('/debug/site/:siteId', async (req, res) => {
     const pool = require('../db');
-    const {siteId} = req.params;
+    const { siteId } = req.params;
     const [sites] = await pool.execute('SELECT * FROM sites WHERE id = ?', [siteId]);
     const [dbs] = await pool.execute('SELECT * FROM `databases` WHERE site_id = ?', [siteId]);
     const [allDbs] = await pool.execute('SELECT * FROM `databases` LIMIT 5');
-    res.json({site: sites[0], linkedDb: dbs[0], allDatabases: allDbs});
+    res.json({ site: sites[0], linkedDb: dbs[0], allDatabases: allDbs });
 });
 console.log('[Routes] Database routes registered');
 
@@ -73,14 +89,14 @@ router.put('/admin/users/:userId/toggle', async (req, res) => {
     try {
         const pool = require('../db');
         const [users] = await pool.execute('SELECT status FROM users WHERE id = ?', [userId]);
-        if(users.length){
+        if (users.length) {
             const newStatus = users[0].status === 'ACTIVE' ? 'SUSPENDED' : 'ACTIVE';
             await pool.execute('UPDATE users SET status = ? WHERE id = ?', [newStatus, userId]);
             res.json({ success: true, status: newStatus });
         } else {
             res.status(404).json({ message: 'User not found' });
         }
-    } catch(e) { res.status(500).json({message: e.message}); }
+    } catch (e) { res.status(500).json({ message: e.message }); }
 });
 router.get('/admin/payments', adminController.getPayments);
 router.put('/admin/payments/:id/verify', async (req, res) => {
@@ -89,7 +105,7 @@ router.put('/admin/payments/:id/verify', async (req, res) => {
     try {
         const pool = require('../db');
         await pool.execute('UPDATE payments SET status = ? WHERE id = ?', [status, id]);
-        
+
         // If Verified, update user plan logic could go here
         if (status === 'VERIFIED') {
             const [rows] = await pool.execute('SELECT user_id, plan FROM payments WHERE id = ?', [id]);
@@ -97,9 +113,9 @@ router.put('/admin/payments/:id/verify', async (req, res) => {
                 await pool.execute('UPDATE users SET plan = ? WHERE id = ?', [rows[0].plan, rows[0].user_id]);
             }
         }
-        
+
         res.json({ success: true });
-    } catch(e) { res.status(500).json({message: e.message}); }
+    } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
 // Admin Tunnels
@@ -110,19 +126,19 @@ router.delete('/admin/tunnels', adminController.deleteTunnel);
 
 // Common
 router.get('/plans', adminController.getPlans);
-router.post('/plans', async (req, res) => { /* Mock create plan */ res.json({id: 'p_'+Date.now()}); });
-router.put('/plans/:id', async (req, res) => { /* Mock update plan */ res.json({success: true}); });
-router.delete('/plans/:id', async (req, res) => { /* Mock delete plan */ res.json({success: true}); });
+router.post('/plans', async (req, res) => { /* Mock create plan */ res.json({ id: 'p_' + Date.now() }); });
+router.put('/plans/:id', async (req, res) => { /* Mock update plan */ res.json({ success: true }); });
+router.delete('/plans/:id', async (req, res) => { /* Mock delete plan */ res.json({ success: true }); });
 
 router.get('/domains', adminController.getDomains);
-router.post('/domains', async (req, res) => { 
+router.post('/domains', async (req, res) => {
     const { name } = req.body;
     const pool = require('../db');
     const id = `d_${Date.now()}`;
     await pool.execute('INSERT INTO domains (id, name, is_primary) VALUES (?, ?, ?)', [id, name, false]);
     res.json({ id, name, isPrimary: false });
 });
-router.delete('/domains/:id', async (req, res) => { 
+router.delete('/domains/:id', async (req, res) => {
     const { id } = req.params;
     const pool = require('../db');
     await pool.execute('DELETE FROM domains WHERE id = ?', [id]);
@@ -133,10 +149,10 @@ router.delete('/domains/:id', async (req, res) => {
 router.get('/admin/apache/sites', adminController.listApacheSites);
 router.get('/admin/apache/sites/:filename', adminController.getApacheSite);
 // Stub routes for full CRUD on apache if needed
-router.post('/admin/apache/sites', (req, res) => res.json({success:true}));
-router.put('/admin/apache/sites/:filename', (req, res) => res.json({success:true}));
-router.delete('/admin/apache/sites/:filename', (req, res) => res.json({success:true}));
-router.get('/admin/apache/httpd', (req, res) => res.json({content: '# Mock httpd.conf'}));
-router.post('/admin/apache/reload', (req, res) => res.json({success:true}));
+router.post('/admin/apache/sites', (req, res) => res.json({ success: true }));
+router.put('/admin/apache/sites/:filename', (req, res) => res.json({ success: true }));
+router.delete('/admin/apache/sites/:filename', (req, res) => res.json({ success: true }));
+router.get('/admin/apache/httpd', (req, res) => res.json({ content: '# Mock httpd.conf' }));
+router.post('/admin/apache/reload', (req, res) => res.json({ success: true }));
 
 module.exports = router;

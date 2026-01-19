@@ -94,8 +94,8 @@ CREATE TABLE IF NOT EXISTS discounts (
 
 CREATE TABLE IF NOT EXISTS command_logs (
   id INT AUTO_INCREMENT PRIMARY KEY,
-  user_id INT NOT NULL,
-  site_id INT NOT NULL,
+  user_id VARCHAR(50) NOT NULL,
+  site_id VARCHAR(50) NOT NULL,
   command TEXT NOT NULL,
   type ENUM('windows', 'ssh') NOT NULL,
   status ENUM('success', 'error') NOT NULL,
