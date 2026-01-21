@@ -55,6 +55,7 @@ export interface Site {
   createdAt: string;
   storageUsed: number; // in MB
   hasDatabase?: boolean; // New field to track database requirement
+  dbName?: string; // Actual database name from databases table
 }
 
 export interface Payment {

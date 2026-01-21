@@ -73,11 +73,22 @@ const buildColumnDefinition = (col) => {
 /**
  * GET /api/db/:siteId/tables
  * List all tables with info
+ * 
+ * IMPORTANT: Always fetches LIVE data from information_schema
+ * NO CACHING - Database is SINGLE SOURCE OF TRUTH
  */
 exports.getTables = async (req, res) => {
     try {
         const dbName = await getDbNameFromSite(req.params.siteId);
         if (!dbName) return res.status(404).json({ error: 'Database not found' });
+
+        // Set no-cache headers to ensure fresh data
+        res.set({
+            'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+            'Surrogate-Control': 'no-store'
+        });
 
         const [tables] = await pool.execute(`
             SELECT 
@@ -93,7 +104,7 @@ exports.getTables = async (req, res) => {
             ORDER BY TABLE_NAME
         `, [dbName]);
 
-        res.json({ success: true, tables });
+        res.json({ success: true, tables, fetchedAt: new Date().toISOString() });
     } catch (e) {
         console.error('[DB] getTables error:', e);
         res.status(500).json({ error: e.message });
@@ -1063,5 +1074,67 @@ exports.importDatabase = async (req, res) => {
             executedQueries: 0,
             errorMessage: e.message
         });
+    }
+};
+// ============================================
+// SCHEMA FINGERPRINT (for change detection)
+// ============================================
+
+/**
+ * GET /api/db/:siteId/fingerprint
+ * Get a hash representing current database schema state
+ * Used for polling-based change detection
+ * 
+ * Returns a hash that changes whenever:
+ * - Tables are added/removed
+ * - Table structure changes (UPDATE_TIME changes)
+ */
+exports.getSchemaFingerprint = async (req, res) => {
+    try {
+        const dbName = await getDbNameFromSite(req.params.siteId);
+        if (!dbName) return res.status(404).json({ error: 'Database not found' });
+
+        // Set no-cache headers
+        res.set({
+            'Cache-Control': 'no-store, no-cache, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0'
+        });
+
+        // Create fingerprint from table metadata
+        const [result] = await pool.execute(`
+            SELECT 
+                GROUP_CONCAT(
+                    CONCAT(TABLE_NAME, ':', IFNULL(UPDATE_TIME, CREATE_TIME))
+                    ORDER BY TABLE_NAME
+                    SEPARATOR '|'
+                ) as fingerprint,
+                COUNT(*) as table_count
+            FROM information_schema.TABLES 
+            WHERE TABLE_SCHEMA = ?
+        `, [dbName]);
+
+        if (!result || !result[0]) {
+            return res.json({ hash: 'empty', tableCount: 0, database: dbName });
+        }
+
+        const fingerprint = result[0].fingerprint || 'empty';
+        const tableCount = result[0].table_count || 0;
+
+        // Simple hash function
+        const hash = fingerprint.split('').reduce((acc, char) => {
+            return ((acc << 5) - acc + char.charCodeAt(0)) | 0;
+        }, 0).toString(16);
+
+        res.json({
+            hash,
+            tableCount,
+            database: dbName,
+            timestamp: new Date().toISOString()
+        });
+
+    } catch (e) {
+        console.error('[DB] getSchemaFingerprint error:', e);
+        res.status(500).json({ error: e.message });
     }
 };

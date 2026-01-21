@@ -1,10 +1,11 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { User, Site, SiteStatus } from '../../types';
 import { api } from '../../services/api';
-import { Database, Server, ExternalLink, Trash2, Link, Table, ChevronDown, ChevronUp, FileSpreadsheet, Plus, X, Loader2, Unlink, AlertTriangle, Upload, Download, ArrowDown, Network } from 'lucide-react';
+import { Database, Server, ExternalLink, Trash2, Link, Table, ChevronDown, ChevronUp, FileSpreadsheet, Plus, X, Loader2, Unlink, AlertTriangle, Upload, Download, ArrowDown, Network, Wifi, WifiOff } from 'lucide-react';
 import { TableViewer } from '../../components/database/TableViewer';
 import { MasterCredentials } from '../../components/database/MasterCredentials';
+import { useDatabaseSync } from '../../hooks/useDatabaseSync';
 
 interface DatabaseManagerProps {
   sites: Site[];
@@ -49,6 +50,7 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({ sites, user, o
     const [expandedDb, setExpandedDb] = useState<string | null>(null);
     const [isCreating, setIsCreating] = useState(false);
     const [targetSiteId, setTargetSiteId] = useState('');
+    const [customDbName, setCustomDbName] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [dbToDelete, setDbToDelete] = useState<Site | null>(null);
     const [isDeleting, setIsDeleting] = useState(false);
@@ -66,6 +68,47 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({ sites, user, o
     const [isImporting, setIsImporting] = useState(false);
     const importFileInputRef = useRef<HTMLInputElement>(null);
     const [activeImportSiteId, setActiveImportSiteId] = useState<string | null>(null);
+
+    // ============================================
+    // REALTIME DATABASE SYNC
+    // ============================================
+    // Auto-refresh tables when database changes from terminal
+    // (e.g., php artisan migrate, db:seed, etc.)
+    
+    const handleRefreshAllTables = useCallback(() => {
+        // Refresh tables for all expanded databases
+        if (expandedDb) {
+            console.log('[DBSync] 🔄 Auto-refreshing tables for:', expandedDb);
+            fetchTables(expandedDb);
+        }
+    }, [expandedDb]);
+    
+    // Get auth token from localStorage (same as used for API calls)
+    const authToken = localStorage.getItem('token') || '';
+    
+    const { isConnected: dbSyncConnected, lastEvent: dbSyncLastEvent } = useDatabaseSync({
+        userId: user.id,
+        token: authToken,
+        siteId: expandedDb || undefined,
+        onDatabaseChanged: (event) => {
+            console.log('[DatabaseManager] 📡 Database changed via terminal:', event);
+            // Show notification to user
+            if (event.operation) {
+                const opNames: Record<string, string> = {
+                    migrate: 'Migration',
+                    rollback: 'Rollback',
+                    seed: 'Seeding',
+                    wipe: 'Database Wipe',
+                    query: 'SQL Query',
+                    unknown: 'Database Change'
+                };
+                console.log(`[DatabaseManager] Operation: ${opNames[event.operation]}`);
+            }
+        },
+        onRefreshTables: handleRefreshAllTables,
+        enablePolling: true,
+        pollingInterval: 30000 // Fallback polling every 30 seconds
+    });
 
     const copyToClipboard = (text: string) => {
         navigator.clipboard.writeText(text);
@@ -162,13 +205,14 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({ sites, user, o
         if (!targetSiteId) return;
         setIsSubmitting(true);
         try {
-            const targetSite = sites.find(s => s.id === targetSiteId);
-            const dbName = targetSite ? `db_${targetSite.subdomain}` : undefined;
-            await api.database.create(targetSiteId, dbName);
+            // Use custom name if provided (without adding db_ prefix - backend handles it)
+            const safeName = customDbName.trim().replace(/[^a-zA-Z0-9_]/g, '');
+            await api.database.create(targetSiteId, safeName || undefined);
             alert('Database created successfully! Refreshing...');
             onRefresh();
             setIsCreating(false);
             setTargetSiteId('');
+            setCustomDbName('');
         } catch (e: any) {
             alert("Failed to create database: " + (e.message || 'Unknown error'));
         } finally {
@@ -236,6 +280,11 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({ sites, user, o
                         <Database className="w-5 h-5 text-indigo-600" />
                         Your Databases
                         <span className="text-xs font-normal text-slate-500 bg-slate-100 px-2 py-1 rounded-full">{dbSites.length} Active</span>
+                        {/* Realtime Sync Status Indicator */}
+                        <span className={`flex items-center gap-1 text-xs px-2 py-1 rounded-full ${dbSyncConnected ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+                            {dbSyncConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
+                            {dbSyncConnected ? 'Live Sync' : 'Polling'}
+                        </span>
                     </h3>
                     <button onClick={() => setIsCreating(true)} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium shadow-sm transition-colors flex items-center justify-center gap-2">
                         <Plus className="w-4 h-4" /> New Database
@@ -245,7 +294,8 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({ sites, user, o
                  {dbSites.length > 0 ? (
                     <div className="flex flex-col gap-4">
                     {dbSites.map((site) => {
-                        const dbName = `db_${site.subdomain.replace(/[^a-z0-9]/g, '')}`;
+                        // Use actual db_name from API, fallback to generated name for backwards compatibility
+                        const dbName = site.dbName || `db_${site.subdomain.replace(/[^a-z0-9]/g, '')}`;
                         const isExpanded = expandedDb === site.id;
                         const tables = siteTables[site.id] || [];
                         const isLoading = loadingTables[site.id];
@@ -417,13 +467,32 @@ export const DatabaseManager: React.FC<DatabaseManagerProps> = ({ sites, user, o
                                 )}
                             </div>
                             {targetSiteId && (
-                                <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-sm">
-                                    <p className="text-slate-600 mb-1">Database Name will be:</p>
-                                    <code className="font-mono font-bold text-indigo-600">db_{sitesWithoutDb.find(s => s.id === targetSiteId)?.subdomain.replace(/[^a-z0-9]/g, '')}</code>
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="block text-sm font-medium text-slate-700 mb-2">Database Name</label>
+                                        <input
+                                            type="text"
+                                            value={customDbName}
+                                            onChange={(e) => setCustomDbName(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''))}
+                                            placeholder={`donasi1`}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-mono"
+                                        />
+                                        <p className="text-xs text-slate-500 mt-1">
+                                            Leave empty for auto-name. Only letters, numbers, and underscores.
+                                        </p>
+                                    </div>
+                                    <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-sm">
+                                        <p className="text-slate-600 mb-1">Database Name will be:</p>
+                                        <code className="font-mono font-bold text-indigo-600">
+                                            {customDbName.trim() 
+                                                ? `db_${user.username.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()}_${customDbName.trim().replace(/[^a-zA-Z0-9_]/g, '').toLowerCase()}` 
+                                                : `db_${user.username.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()}_${sitesWithoutDb.find(s => s.id === targetSiteId)?.name.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'projectname'}`}
+                                        </code>
+                                    </div>
                                 </div>
                             )}
                             <div className="pt-4 flex justify-end gap-3">
-                                <button onClick={() => setIsCreating(false)} className="px-4 py-2 text-slate-600 hover:bg-slate-50 rounded-lg font-medium text-sm transition-colors">Cancel</button>
+                                <button onClick={() => { setIsCreating(false); setCustomDbName(''); setTargetSiteId(''); }} className="px-4 py-2 text-slate-600 hover:bg-slate-50 rounded-lg font-medium text-sm transition-colors">Cancel</button>
                                 <button onClick={handleCreateDatabase} disabled={!targetSiteId || isSubmitting} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium text-sm shadow-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2">{isSubmitting && <Loader2 className="w-4 h-4 animate-spin" />} Create Database</button>
                             </div>
                         </div>

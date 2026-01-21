@@ -25,7 +25,7 @@ const EDITABLE_EXTENSIONS = [
     '.php', '.py', '.rb', '.java', '.c', '.cpp', '.h',
     '.sql', '.sh', '.bash', '.zsh', '.ps1',
     '.conf', '.config', '.ini', '.cfg',
-    '.htaccess', '.gitignore', '.npmrc',
+    '.htaccess', '.gitignore', '.npmrc', '.env',
     '.editorconfig', '.prettierrc', '.eslintrc'
 ];
 
@@ -36,7 +36,7 @@ const BLOCKED_EXTENSIONS = [
     '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg', '.ico',
     '.mp3', '.mp4', '.avi', '.mkv', '.mov', '.wav', '.flac',
     '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
-    '.env', '.env.local', '.env.production', '.env.development',
+    // '.env' files are now allowed for development purposes
     '.pem', '.key', '.crt', '.p12'
 ];
 
@@ -258,11 +258,17 @@ const validatePath = (basePath, userPath) => {
  */
 const isEditableFile = (filename) => {
     const ext = path.extname(filename).toLowerCase();
+    const baseName = path.basename(filename).toLowerCase();
+
+    // Allow .env files (e.g., .env, .env.local, .env.production)
+    if (baseName.startsWith('.env')) {
+        return true;
+    }
 
     // Files without extension - allow (e.g., Makefile, Dockerfile)
     if (!ext) {
         const noExtAllowed = ['makefile', 'dockerfile', 'jenkinsfile', 'vagrantfile', 'readme', 'license', 'changelog'];
-        return noExtAllowed.includes(filename.toLowerCase());
+        return noExtAllowed.includes(baseName);
     }
 
     return EDITABLE_EXTENSIONS.includes(ext);
@@ -275,6 +281,13 @@ const isEditableFile = (filename) => {
  */
 const isBlockedFile = (filename) => {
     const ext = path.extname(filename).toLowerCase();
+    const baseName = path.basename(filename).toLowerCase();
+    
+    // Allow .env files
+    if (baseName.startsWith('.env')) {
+        return false;
+    }
+    
     return BLOCKED_EXTENSIONS.includes(ext);
 };
 

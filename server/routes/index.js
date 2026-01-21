@@ -8,6 +8,7 @@ const authController = require('../controllers/authController');
 const siteController = require('../controllers/siteController');
 const fileController = require('../controllers/fileController');
 const databaseController = require('../controllers/databaseController'); // NEW
+const userDatabaseController = require('../controllers/userDatabaseController'); // User-isolated DB
 const adminController = require('../controllers/adminController');
 const ticketController = require('../controllers/ticketController');
 const paymentController = require('../controllers/paymentController');
@@ -75,11 +76,46 @@ router.delete('/db/:siteId/tables/:tableName/indexes/:indexName', databaseContro
 // Schema & ERD
 router.get('/db/:siteId/schema', databaseController.getFullSchema);
 router.get('/db/:siteId/erd', databaseController.getERDData);
+router.get('/db/:siteId/fingerprint', databaseController.getSchemaFingerprint);
 
 // Query & Export/Import
 router.post('/db/:siteId/query', databaseController.executeQuery);
 router.get('/db/:siteId/export', databaseController.exportDatabase);
 router.post('/db/:siteId/import', upload.single('file'), databaseController.importDatabase);
+
+// ============================================
+// USER DATABASE MANAGEMENT (Multi-tenant isolated)
+// ============================================
+// These routes use per-user MySQL credentials for isolation
+
+// Credentials
+router.get('/user-db/credentials', userDatabaseController.getCredentials);
+router.post('/user-db/credentials/reset', userDatabaseController.resetPassword);
+
+// Database CRUD
+router.get('/user-db/databases', userDatabaseController.listDatabases);
+router.post('/user-db/databases', userDatabaseController.createDatabase);
+router.delete('/user-db/databases/:dbName', userDatabaseController.dropDatabase);
+router.get('/user-db/databases/:dbName/info', userDatabaseController.getDatabaseInfo);
+
+// SQL Query
+router.post('/user-db/databases/:dbName/query', userDatabaseController.executeQuery);
+router.get('/user-db/databases/:dbName/history', userDatabaseController.getQueryHistory);
+
+// Import/Export
+router.post('/user-db/databases/:dbName/import', upload.single('file'), userDatabaseController.importDatabase);
+router.get('/user-db/databases/:dbName/export', userDatabaseController.exportDatabase);
+
+// Terminal Integration
+router.post('/user-db/sync-terminal', userDatabaseController.syncToTerminal);
+router.get('/user-db/env-content', userDatabaseController.getEnvContent);
+
+// Database Discovery & Sync (Terminal ↔ UI)
+router.post('/user-db/discover', userDatabaseController.discoverDatabases);
+router.post('/user-db/import-external', userDatabaseController.importExternalDatabase);
+router.post('/user-db/refresh-stats', userDatabaseController.refreshStats);
+
+console.log('[Routes] User Database routes registered');
 
 console.log('[Routes] Database management routes registered');
 

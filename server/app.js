@@ -81,6 +81,16 @@ const createApp = () => {
 
     // 6. WebSocket Connection Handler
     const { handleTerminalConnection } = require('./controllers/terminalController');
+    
+    // Register Socket.IO with database sync service for realtime updates
+    let dbSyncService;
+    try {
+        dbSyncService = require('./services/databaseSyncService');
+        dbSyncService.registerSocketIO(io);
+        console.log('[Socket.IO] ✅ Database sync service registered');
+    } catch (e) {
+        console.warn('[Socket.IO] ⚠️ Database sync service not available:', e.message);
+    }
 
     io.on('connection', (socket) => {
         console.log('══════════════════════════════════════════');
@@ -90,6 +100,11 @@ const createApp = () => {
         console.log('[Socket.IO] Role:', socket.user.role);
         console.log('[Socket.IO] Transport:', socket.conn.transport.name);
         console.log('══════════════════════════════════════════');
+
+        // Join user to their personal room for targeted events (database changes, etc.)
+        const userRoom = `user_${socket.user.id}`;
+        socket.join(userRoom);
+        console.log(`[Socket.IO] User joined room: ${userRoom}`);
 
         // Handle terminal commands
         handleTerminalConnection(socket);

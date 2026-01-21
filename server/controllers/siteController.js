@@ -8,6 +8,164 @@ const { STORAGE_ROOT } = require('../config/paths');
 const { getSafePath } = require('../utils/helpers');
 
 /**
+ * Parse .env file content into object
+ */
+const parseEnvFile = (content) => {
+    const result = {};
+    const lines = content.split('\n');
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const eqIndex = trimmed.indexOf('=');
+        if (eqIndex === -1) continue;
+        const key = trimmed.substring(0, eqIndex).trim();
+        let value = trimmed.substring(eqIndex + 1).trim();
+        // Remove quotes if present
+        if ((value.startsWith('"') && value.endsWith('"')) || 
+            (value.startsWith("'") && value.endsWith("'"))) {
+            value = value.slice(1, -1);
+        }
+        result[key] = value;
+    }
+    return result;
+};
+
+/**
+ * Find .env file in directory (handles nested Laravel structure)
+ */
+const findEnvFile = (dir) => {
+    // Direct .env in dir
+    const directEnv = path.join(dir, '.env');
+    if (fs.existsSync(directEnv)) return directEnv;
+    
+    // Check for .env.example to copy
+    const envExample = path.join(dir, '.env.example');
+    if (fs.existsSync(envExample)) {
+        fs.copyFileSync(envExample, directEnv);
+        return directEnv;
+    }
+    
+    // Check first-level subdirectory (common for zip with root folder)
+    const items = fs.readdirSync(dir);
+    for (const item of items) {
+        const itemPath = path.join(dir, item);
+        if (fs.statSync(itemPath).isDirectory()) {
+            const nestedEnv = path.join(itemPath, '.env');
+            if (fs.existsSync(nestedEnv)) return nestedEnv;
+            
+            const nestedExample = path.join(itemPath, '.env.example');
+            if (fs.existsSync(nestedExample)) {
+                fs.copyFileSync(nestedExample, nestedEnv);
+                return nestedEnv;
+            }
+        }
+    }
+    
+    return null;
+};
+
+/**
+ * Auto-update .env database name with prefix
+ * - Reads DB_DATABASE from .env
+ * - Adds prefix: db_username_originalname
+ * - Updates .env with new database name and credentials
+ * - User will run migrate themselves
+ */
+const autoUpdateEnvDatabase = async (siteDir, username, userId) => {
+    try {
+        const envPath = findEnvFile(siteDir);
+        if (!envPath) {
+            console.log('[AutoEnv] No .env file found, skipping');
+            return null;
+        }
+        
+        console.log(`[AutoEnv] Found .env at: ${envPath}`);
+        
+        const envContent = fs.readFileSync(envPath, 'utf-8');
+        const envVars = parseEnvFile(envContent);
+        
+        // Get original database name from .env
+        const originalDbName = envVars.DB_DATABASE;
+        if (!originalDbName) {
+            console.log('[AutoEnv] No DB_DATABASE in .env, skipping');
+            return null;
+        }
+        
+        // Create new database name: db_username_originalname
+        const safeUsername = username.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+        const safeDbName = originalDbName.replace(/[^a-zA-Z0-9_]/g, '').toLowerCase();
+        const newDbName = `db_${safeUsername}_${safeDbName}`;
+        
+        console.log(`[AutoEnv] Renaming DB: ${originalDbName} → ${newDbName}`);
+        
+        // MySQL user for this user
+        const mysqlUser = `sql_${safeUsername}`;
+        
+        // Get or create MySQL password for user
+        const [creds] = await pool.execute(
+            'SELECT mysql_password FROM database_credentials WHERE user_id = ?', 
+            [userId]
+        );
+        
+        let mysqlPass;
+        if (creds.length > 0 && creds[0].mysql_password) {
+            mysqlPass = creds[0].mysql_password;
+        } else {
+            // Generate new password
+            const idPart = userId.substring(0, 4);
+            const namePart = username.replace(/[^a-zA-Z0-9]/g, '').substring(0, 3).toUpperCase();
+            mysqlPass = `kp_${idPart}@${namePart}#88`;
+            
+            // Ensure MySQL user exists
+            await pool.query(`CREATE USER IF NOT EXISTS '${mysqlUser}'@'%' IDENTIFIED BY '${mysqlPass}'`);
+            
+            // Save credentials to panel
+            await pool.execute(
+                `INSERT INTO database_credentials (user_id, mysql_user, mysql_password, created_at) 
+                 VALUES (?, ?, ?, NOW()) 
+                 ON DUPLICATE KEY UPDATE mysql_password = VALUES(mysql_password)`,
+                [userId, mysqlUser, mysqlPass]
+            );
+        }
+        
+        // Update .env file with new database name and credentials
+        let newEnvContent = envContent;
+        
+        const dbSettings = {
+            'DB_CONNECTION': 'mysql',
+            'DB_HOST': 'host.docker.internal',
+            'DB_PORT': '3306',
+            'DB_DATABASE': newDbName,
+            'DB_USERNAME': mysqlUser,
+            'DB_PASSWORD': mysqlPass
+        };
+        
+        for (const [key, value] of Object.entries(dbSettings)) {
+            const regex = new RegExp(`^${key}=.*$`, 'm');
+            if (regex.test(newEnvContent)) {
+                newEnvContent = newEnvContent.replace(regex, `${key}=${value}`);
+            } else {
+                newEnvContent += `\n${key}=${value}`;
+            }
+        }
+        
+        fs.writeFileSync(envPath, newEnvContent, 'utf-8');
+        console.log(`[AutoEnv] ✅ Updated .env: DB_DATABASE=${newDbName}`);
+        
+        return {
+            originalDbName,
+            newDbName,
+            mysqlUser,
+            envPath
+        };
+        
+    } catch (error) {
+        console.error('[AutoEnv] Error:', error);
+        return null;
+    }
+};
+
+/**
  * Calculate directory size recursively (async)
  * @param {string} dirPath - Path to directory
  * @returns {Promise<number>} - Total size in bytes
@@ -60,10 +218,18 @@ exports.listSites = async (req, res) => {
     const { userId } = req.query;
     if (!userId) return res.status(400).json({ message: 'userId is required' });
     try {
-        const [sites] = await pool.execute('SELECT * FROM sites WHERE user_id = ? ORDER BY created_at DESC', [userId]);
+        // Join with databases table to get the actual db_name
+        const [sites] = await pool.execute(`
+            SELECT s.*, d.db_name as database_name 
+            FROM sites s 
+            LEFT JOIN \`databases\` d ON s.id = d.site_id 
+            WHERE s.user_id = ? 
+            ORDER BY s.created_at DESC
+        `, [userId]);
         const mapped = sites.map((s) => ({
             id: s.id, userId: s.user_id, name: s.name, subdomain: s.subdomain, framework: s.framework,
             status: s.status, createdAt: s.created_at, storageUsed: s.storage_used, hasDatabase: !!s.has_database,
+            dbName: s.database_name || null, // Include actual database name
         }));
         res.json(mapped);
     } catch (err) { res.status(500).json({ message: err.message }); }
@@ -122,51 +288,22 @@ exports.deploySite = async (req, res) => {
         }
 
         const siteId = `s_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-        const hasDb = needsDatabase === 'true';
 
         await pool.execute(
             `INSERT INTO sites (id, user_id, name, subdomain, framework, status, created_at, storage_used, has_database) 
              VALUES (?, ?, ?, ?, ?, 'ACTIVE', NOW(), ?, ?)`,
-            [siteId, userId, siteFolderName, subdomain, framework || 'HTML', sizeMB, hasDb || !!attachedDatabaseId]
+            [siteId, userId, siteFolderName, subdomain, framework || 'HTML', sizeMB, false]
         );
 
-        if (hasDb) {
-            const suffix = Math.random().toString(36).substr(2, 6);
-            const uPart = username.substring(0, 3).toLowerCase();
-            const sPart = name.substring(0, 3).toLowerCase();
-            const realDbName = `db_${uPart}_${sPart}_${suffix}`.replace(/[^a-z0-9_]/g, '');
-            const mysqlUser = `sql_${username.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()}`;
-            const idPart = userId.substring(0, 4);
-            const namePart = username.replace(/[^a-zA-Z0-9]/g, '').substring(0, 3).toUpperCase();
-            const mysqlPass = `kp_${idPart}@${namePart}#88`;
-
-            try {
-                // 1. Create DB
-                await pool.query(`CREATE DATABASE IF NOT EXISTS \`${realDbName}\``);
-
-                // 2. Ensure User Exists
-                await pool.query(`CREATE USER IF NOT EXISTS '${mysqlUser}'@'%' IDENTIFIED BY '${mysqlPass}'`);
-
-                // 3. Grant Privileges
-                await pool.query(`GRANT ALL PRIVILEGES ON \`${realDbName}\`.* TO '${mysqlUser}'@'%'`);
-                await pool.query('FLUSH PRIVILEGES');
-
-                // 4. Register in 'databases' table (Backticks REQUIRED for reserved keyword 'databases')
-                const dbId = `db_${Date.now()}`;
-                await pool.execute(
-                    'INSERT INTO `databases` (id, site_id, name, db_name) VALUES (?, ?, ?, ?)',
-                    [dbId, siteId, name || realDbName, realDbName]
-                );
-
-                // 5. Update site flag
-                await pool.execute('UPDATE sites SET has_database = TRUE WHERE id = ?', [siteId]);
-
-                console.log(`[MySQL] Created DB ${realDbName} and granted to ${mysqlUser}`);
-            } catch (dbErr) {
-                console.error(`[MySQL] Failed to setup database for ${name}:`, dbErr);
-                // Don't fail the whole request, but log error
+        // AUTO ENV UPDATE: If file was uploaded, update .env with db_username_dbname format
+        if (file) {
+            const autoEnvResult = await autoUpdateEnvDatabase(siteDir, username, userId);
+            if (autoEnvResult) {
+                console.log(`[Deploy] 📝 Updated .env: ${autoEnvResult.originalDbName} → ${autoEnvResult.newDbName}`);
             }
-        } else if (attachedDatabaseId) {
+        }
+
+        if (attachedDatabaseId) {
             // Link existing orphaned database
             await pool.execute('UPDATE `databases` SET site_id = ? WHERE id = ?', [siteId, attachedDatabaseId]);
             await pool.execute('UPDATE sites SET has_database = TRUE WHERE id = ?', [siteId]);
@@ -242,7 +379,7 @@ exports.listDatabases = async (req, res) => {
 
 exports.createDatabase = async (req, res) => {
     const { siteId } = req.params;
-    const { name } = req.body;
+    const { name } = req.body; // Custom database name from user
     try {
         const [existing] = await pool.execute('SELECT id FROM `databases` WHERE site_id = ?', [siteId]);
         if (existing.length > 0) {
@@ -256,10 +393,27 @@ exports.createDatabase = async (req, res) => {
         const [users] = await pool.execute('SELECT username FROM users WHERE id = ?', [site.user_id]);
         const username = users[0].username;
 
-        const suffix = Math.random().toString(36).substr(2, 6);
-        const uPart = username.substring(0, 3).toLowerCase();
-        const sPart = site.name.substring(0, 3).toLowerCase();
-        const realDbName = `db_${uPart}_${sPart}_${suffix}`.replace(/[^a-z0-9_]/g, '');
+        // Use custom name if provided, otherwise generate one
+        // Format: db_username_dbname
+        const safeUsername = username.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+        let realDbName;
+        if (name && name.trim()) {
+            // Sanitize custom name
+            const customName = name.trim().replace(/[^a-zA-Z0-9_]/g, '').toLowerCase();
+            // Format: db_username_customname
+            realDbName = `db_${safeUsername}_${customName}`;
+        } else {
+            // Generate name from username and site
+            const safeSiteName = site.name.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+            realDbName = `db_${safeUsername}_${safeSiteName}`;
+        }
+        
+        // Check if database name already exists
+        const [existingDb] = await pool.execute('SELECT id FROM `databases` WHERE db_name = ?', [realDbName]);
+        if (existingDb.length > 0) {
+            return res.status(400).json({ message: `Database name '${realDbName}' already exists. Please choose a different name.` });
+        }
+        
         const mysqlUser = `sql_${username.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()}`;
 
         await pool.query(`CREATE DATABASE IF NOT EXISTS \`${realDbName}\``);

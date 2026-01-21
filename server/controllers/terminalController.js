@@ -9,6 +9,8 @@
  * - Resource limits (CPU, RAM)
  * - Command filtering (security)
  * - Real-time output via WebSocket
+ * - Database credentials sync (for php artisan migrate, etc.)
+ * - REALTIME DATABASE SYNC (auto-update UI after migrations)
  */
 
 const { spawn, exec } = require('child_process');
@@ -16,6 +18,24 @@ const path = require('path');
 const fs = require('fs');
 const pool = require('../db');
 const { STORAGE_ROOT } = require('../config/paths');
+
+// Import database credential service for terminal integration
+let credentialService;
+try {
+    credentialService = require('../services/databaseCredentialService');
+} catch (e) {
+    console.warn('[Terminal] Database credential service not available:', e.message);
+    credentialService = null;
+}
+
+// Import database sync service for realtime UI updates
+let dbSyncService;
+try {
+    dbSyncService = require('../services/databaseSyncService');
+} catch (e) {
+    console.warn('[Terminal] Database sync service not available:', e.message);
+    dbSyncService = null;
+}
 
 // ============================================
 // CONFIGURATION
@@ -78,6 +98,9 @@ const ALLOWED_COMMANDS = {
     // ========== PHP & Laravel ==========
     'php': { allowed: true, description: 'PHP interpreter' },
     'composer': { allowed: true, description: 'PHP package manager' },
+
+    // ========== Database ==========
+    'mysql': { allowed: true, description: 'MySQL client' },
 
     // ========== Node.js & NPM ==========
     'node': { allowed: true, description: 'Node.js runtime' },
@@ -648,10 +671,21 @@ const handleTerminalConnection = (socket) => {
 
     // Start container when user connects
     if (userId) {
-        startContainer(userId).then(() => {
+        startContainer(userId).then(async (containerName) => {
+            // Sync database credentials to container workspace
+            if (credentialService) {
+                try {
+                    await credentialService.syncCredentialsToContainer(userId, containerName);
+                    console.log(`[Terminal] ✅ Database credentials synced for user ${username}`);
+                } catch (syncError) {
+                    console.warn(`[Terminal] ⚠️ Failed to sync DB credentials: ${syncError.message}`);
+                    // Non-fatal: container still works, just won't have DB credentials file
+                }
+            }
+            
             socket.emit('terminal:ready', {
                 message: 'Terminal ready',
-                container: getContainerName(userId)
+                container: containerName
             });
             socket.emit('terminal:output', '\r\n\x1b[32m╔════════════════════════════════════════╗\r\n║     KoHost Web Terminal Connected      ║\r\n║  Type "help" for available commands    ║\r\n╚════════════════════════════════════════╝\x1b[0m\r\n\r\n$ ');
         }).catch(err => {
@@ -763,8 +797,51 @@ const handleTerminalConnection = (socket) => {
                     [siteId]
                 );
                 if (sites.length > 0 && sites[0].name) {
-                    session.cwd = `/workspace/${sites[0].name}`;
+                    const sitePath = `/workspace/${sites[0].name}`;
                     console.log('[Terminal] 📂 Site folder from DB:', sites[0].name);
+                    
+                    // Auto-detect actual project root (find artisan or package.json)
+                    // Sometimes the project is in a subfolder after extraction
+                    const containerName = getContainerName(userId);
+                    const running = await containerRunning(containerName);
+                    
+                    if (running) {
+                        try {
+                            // Find artisan file (Laravel) or package.json (Node.js) within site folder
+                            const findResult = await new Promise((resolve, reject) => {
+                                exec(
+                                    `docker exec ${containerName} bash -c "find ${sitePath} -maxdepth 2 -name 'artisan' -o -name 'package.json' 2>/dev/null | head -1"`,
+                                    { timeout: 5000 },
+                                    (error, stdout) => {
+                                        if (error) reject(error);
+                                        else resolve(stdout.trim());
+                                    }
+                                );
+                            });
+                            
+                            if (findResult) {
+                                // Get parent directory of found file
+                                const projectRoot = path.posix.dirname(findResult);
+                                if (projectRoot && projectRoot !== sitePath && projectRoot.startsWith(sitePath)) {
+                                    console.log('[Terminal] 🎯 Auto-detected project root:', projectRoot);
+                                    session.cwd = projectRoot;
+                                    socket.emit('command_output', { 
+                                        data: `📂 Auto-detected project in: ${projectRoot.replace(sitePath, '.')}\n`, 
+                                        type: 'stderr' 
+                                    });
+                                } else {
+                                    session.cwd = sitePath;
+                                }
+                            } else {
+                                session.cwd = sitePath;
+                            }
+                        } catch (findErr) {
+                            console.log('[Terminal] ⚠️ Project root detection failed:', findErr.message);
+                            session.cwd = sitePath;
+                        }
+                    } else {
+                        session.cwd = sitePath;
+                    }
                 } else {
                     session.cwd = `/workspace`;
                 }
@@ -949,6 +1026,22 @@ const handleTerminalConnection = (socket) => {
                     socket.emit('command_output', { 
                         data: `Command finished with no output (exit code: ${code})\n`, 
                         type: 'stderr' 
+                    });
+                }
+
+                // ============================================
+                // DATABASE SYNC: Notify UI of database changes
+                // ============================================
+                // After command completes, check if it was a database-modifying command
+                // If so, emit DATABASE_CHANGED event to trigger UI refresh
+                if (dbSyncService) {
+                    dbSyncService.notifyDatabaseCommandCompleted({
+                        userId,
+                        command: trimmedCmd,
+                        exitCode: code,
+                        siteId: session.siteId
+                    }).catch(err => {
+                        console.warn('[Terminal] DB sync notification failed:', err.message);
                     });
                 }
 
