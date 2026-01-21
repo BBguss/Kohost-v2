@@ -1,10 +1,42 @@
 
 const pool = require('../db');
 const fs = require('fs');
+const fsp = require('fs').promises;
 const path = require('path');
 const { extractZip } = require('../extract');
 const { STORAGE_ROOT } = require('../config/paths');
 const { getSafePath } = require('../utils/helpers');
+
+/**
+ * Calculate directory size recursively (async)
+ * @param {string} dirPath - Path to directory
+ * @returns {Promise<number>} - Total size in bytes
+ */
+const calculateDirSize = async (dirPath) => {
+    let totalSize = 0;
+
+    try {
+        const items = await fsp.readdir(dirPath, { withFileTypes: true });
+
+        for (const item of items) {
+            const itemPath = path.join(dirPath, item.name);
+
+            // Skip symbolic links for security
+            const stats = await fsp.lstat(itemPath);
+            if (stats.isSymbolicLink()) continue;
+
+            if (item.isDirectory()) {
+                totalSize += await calculateDirSize(itemPath);
+            } else {
+                totalSize += stats.size;
+            }
+        }
+    } catch (e) {
+        console.warn(`[Storage] Could not read: ${dirPath}`, e.message);
+    }
+
+    return totalSize;
+};
 
 // Helper to resolve DB Name from siteId or databaseId
 const getDbName = async (params) => {
@@ -382,32 +414,219 @@ exports.getDatabaseSchema = async (req, res) => {
 exports.importDatabase = async (req, res) => {
     console.log('[importDatabase] Called with siteId:', req.params.siteId);
     const file = req.file;
+
+    // 1. Validate file exists
     if (!file) {
         console.log('[importDatabase] No file uploaded');
-        return res.status(400).json({ message: 'No file uploaded' });
+        return res.status(400).json({
+            status: 'failed',
+            message: 'No file uploaded',
+            executedQueries: 0
+        });
     }
+
+    console.log('[importDatabase] File info:', {
+        originalname: file.originalname,
+        mimetype: file.mimetype,
+        size: file.size,
+        path: file.path || 'N/A (memory)',
+        hasBuffer: !!file.buffer
+    });
 
     try {
         console.log('[importDatabase] Looking up database for siteId:', req.params.siteId);
         const dbName = await getDbName(req.params);
         console.log('[importDatabase] Found dbName:', dbName);
-        if (!dbName) return res.status(404).json({ message: 'Database not found. Please create one first.' });
 
-        const sqlContent = file.buffer.toString('utf-8');
+        if (!dbName) {
+            return res.status(404).json({
+                status: 'failed',
+                message: 'Database not found. Please create one first.',
+                executedQueries: 0
+            });
+        }
 
+        // 2. Read SQL content - handle both diskStorage and memoryStorage
+        let sqlContent;
+
+        if (file.path) {
+            // diskStorage: read from file path
+            console.log('[importDatabase] Reading from disk:', file.path);
+            const fs = require('fs');
+
+            if (!fs.existsSync(file.path)) {
+                return res.status(400).json({
+                    status: 'failed',
+                    message: 'Uploaded file not found on disk',
+                    executedQueries: 0
+                });
+            }
+
+            sqlContent = fs.readFileSync(file.path, 'utf-8');
+
+            // Clean up temp file after reading
+            try {
+                fs.unlinkSync(file.path);
+            } catch (cleanupErr) {
+                console.log('[importDatabase] Failed to cleanup temp file:', cleanupErr.message);
+            }
+        } else if (file.buffer) {
+            // memoryStorage: read from buffer
+            console.log('[importDatabase] Reading from buffer');
+            sqlContent = file.buffer.toString('utf-8');
+        } else {
+            console.log('[importDatabase] No file.path and no file.buffer!');
+            return res.status(400).json({
+                status: 'failed',
+                message: 'Unable to read uploaded file (no path or buffer)',
+                executedQueries: 0
+            });
+        }
+
+        console.log('[importDatabase] SQL content length:', sqlContent.length, 'bytes');
+
+        // 3. Parse SQL statements - improved for phpMyAdmin dumps
+        const rawStatements = sqlContent
+            .split(/;\s*(?=(?:[^'"`]*(['"`])[^'"`]*\1)*[^'"`]*$)/g) // Split by ; outside quotes
+            .filter(s => s && typeof s === 'string'); // Remove undefined/null
+
+        console.log('[importDatabase] Raw statements after split:', rawStatements.length);
+
+        // 4. Filter and clean statements
+        const isSkippableStatement = (stmt) => {
+            const trimmed = stmt.trim();
+            const upper = trimmed.toUpperCase();
+
+            // Skip empty
+            if (!trimmed || trimmed.length === 0) return true;
+
+            // Skip single quotes/chars (regex artifacts)
+            if (trimmed.length <= 2) return true;
+
+            // Skip comments
+            if (trimmed.startsWith('--')) return true;
+            if (trimmed.startsWith('#')) return true;
+            if (trimmed.startsWith('/*') && !trimmed.startsWith('/*!')) return true;
+
+            // Skip SET statements (phpMyAdmin config)
+            if (upper.startsWith('SET ')) return true;
+            if (upper.startsWith('SET\t')) return true;
+            if (upper.startsWith('SET\n')) return true;
+
+            // Skip USE database (we already switched)
+            if (upper.startsWith('USE ')) return true;
+
+            // Skip phpMyAdmin directives (but execute some important ones)
+            if (trimmed.startsWith('/*!40')) return true; // MySQL version comments
+            if (trimmed.startsWith('/*!50')) return true;
+            if (trimmed.startsWith('/*!80')) return true;
+
+            // Skip dangerous statements
+            if (upper.startsWith('DROP DATABASE')) return true;
+            if (upper.startsWith('CREATE DATABASE')) return true;
+            if (upper.includes('GRANT ')) return true;
+            if (upper.includes('REVOKE ')) return true;
+
+            return false;
+        };
+
+        const statements = rawStatements
+            .map(s => s.trim())
+            .filter(s => !isSkippableStatement(s));
+
+        console.log('[importDatabase] Executable statements after filter:', statements.length);
+
+        // Log first 3 statements for debugging
+        for (let i = 0; i < Math.min(3, statements.length); i++) {
+            console.log(`[importDatabase] Statement #${i + 1} preview:`, statements[i].substring(0, 100));
+        }
+
+        if (statements.length === 0) {
+            return res.status(400).json({
+                status: 'failed',
+                message: 'No executable SQL statements found in file (all were comments or SET statements)',
+                executedQueries: 0
+            });
+        }
+
+        // 5. Execute statements one by one
         const connection = await pool.getConnection();
+        let executedQueries = 0;
+        let skippedQueries = 0;
+        let failedQuery = null;
+        let failedQueryIndex = null;
+        let errorMessage = null;
+
         try {
             await connection.query(`USE \`${dbName}\``);
-            await connection.query(sqlContent);
-            console.log(`[Database] Imported ${file.originalname} into ${dbName}`);
+            await connection.query('SET FOREIGN_KEY_CHECKS = 0');
+            await connection.query('SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO"');
+            await connection.query('SET NAMES utf8mb4');
+
+            for (let i = 0; i < statements.length; i++) {
+                const stmt = statements[i].trim();
+
+                // Double-check: skip if empty or too short
+                if (!stmt || stmt.length < 5) {
+                    skippedQueries++;
+                    continue;
+                }
+
+                // Log first query for debugging
+                if (i === 0) {
+                    console.log('[importDatabase] EXECUTING QUERY #1:', stmt.substring(0, 200));
+                }
+
+                try {
+                    await connection.query(stmt);
+                    executedQueries++;
+
+                    if (executedQueries % 50 === 0) {
+                        console.log(`[importDatabase] Progress: ${executedQueries}/${statements.length}`);
+                    }
+                } catch (queryErr) {
+                    failedQuery = stmt.substring(0, 300);
+                    failedQueryIndex = i + 1;
+                    errorMessage = queryErr.message;
+                    console.error(`[importDatabase] Query #${i + 1} failed:`);
+                    console.error(`[importDatabase] Query content:`, stmt.substring(0, 200));
+                    console.error(`[importDatabase] Error:`, queryErr.message);
+                    throw queryErr;
+                }
+            }
+
+            await connection.query('SET FOREIGN_KEY_CHECKS = 1');
+            console.log(`[importDatabase] ✅ Success: ${executedQueries} queries executed`);
+
+            res.json({
+                status: 'success',
+                message: 'Database imported successfully',
+                executedQueries,
+                totalQueries: statements.length
+            });
+
+        } catch (execErr) {
+            await connection.query('SET FOREIGN_KEY_CHECKS = 1').catch(() => { });
+
+            res.status(422).json({
+                status: 'failed',
+                message: 'Import failed at query ' + (executedQueries + 1),
+                executedQueries,
+                totalQueries: statements.length,
+                failedQuery,
+                errorMessage
+            });
         } finally {
             connection.release();
         }
 
-        res.json({ success: true, message: 'Database imported successfully' });
     } catch (e) {
-        console.error("[Database] Import Failed:", e);
-        res.status(500).json({ message: 'Import failed: ' + e.message });
+        console.error("[importDatabase] Error:", e);
+        res.status(500).json({
+            status: 'failed',
+            message: 'Import failed: ' + e.message,
+            executedQueries: 0
+        });
     }
 };
 
@@ -427,5 +646,120 @@ exports.exportDatabase = async (req, res) => {
         res.send(sql);
     } catch (e) {
         res.status(500).send("Export failed: " + e.message);
+    }
+};
+
+/**
+ * RECALCULATE STORAGE
+ * ===================
+ * Menghitung ulang storage usage dari ukuran file yang sebenarnya di disk
+ */
+exports.recalculateStorage = async (req, res) => {
+    const { siteId } = req.params;
+
+    if (!siteId) {
+        return res.status(400).json({ message: 'siteId is required' });
+    }
+
+    try {
+        // Get site info
+        const [sites] = await pool.execute('SELECT * FROM sites WHERE id = ?', [siteId]);
+        if (sites.length === 0) {
+            return res.status(404).json({ message: 'Site not found' });
+        }
+        const site = sites[0];
+
+        // Get user info
+        const [users] = await pool.execute('SELECT username FROM users WHERE id = ?', [site.user_id]);
+        if (users.length === 0) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // Calculate actual storage from disk
+        const siteDir = path.join(STORAGE_ROOT, users[0].username, site.name);
+
+        if (!fs.existsSync(siteDir)) {
+            // Site folder doesn't exist, set to 0
+            await pool.execute('UPDATE sites SET storage_used = 0 WHERE id = ?', [siteId]);
+            return res.json({
+                success: true,
+                siteId,
+                oldStorageMB: site.storage_used,
+                newStorageMB: 0,
+                message: 'Site folder not found, storage set to 0'
+            });
+        }
+
+        // Calculate actual size
+        const totalBytes = await calculateDirSize(siteDir);
+        const totalMB = totalBytes / (1024 * 1024);
+
+        // Update database
+        await pool.execute('UPDATE sites SET storage_used = ? WHERE id = ?', [totalMB, siteId]);
+
+        console.log(`[Storage] ✅ Recalculated storage for ${site.name}: ${site.storage_used?.toFixed(2) || 0}MB → ${totalMB.toFixed(2)}MB`);
+
+        res.json({
+            success: true,
+            siteId,
+            siteName: site.name,
+            oldStorageMB: site.storage_used || 0,
+            newStorageMB: parseFloat(totalMB.toFixed(2)),
+            totalBytes,
+            message: 'Storage recalculated from disk'
+        });
+
+    } catch (e) {
+        console.error('[Storage] Recalculate error:', e);
+        res.status(500).json({ message: e.message });
+    }
+};
+
+/**
+ * GET SITE STORAGE INFO
+ * =====================
+ * Mendapatkan info storage untuk site dengan opsi recalculate
+ */
+exports.getSiteStorage = async (req, res) => {
+    const { siteId } = req.params;
+    const { recalculate } = req.query;
+
+    try {
+        const [sites] = await pool.execute('SELECT * FROM sites WHERE id = ?', [siteId]);
+        if (sites.length === 0) {
+            return res.status(404).json({ message: 'Site not found' });
+        }
+        const site = sites[0];
+
+        let storageUsed = site.storage_used || 0;
+        let recalculated = false;
+
+        // Optionally recalculate from disk
+        if (recalculate === 'true') {
+            const [users] = await pool.execute('SELECT username FROM users WHERE id = ?', [site.user_id]);
+            if (users.length > 0) {
+                const siteDir = path.join(STORAGE_ROOT, users[0].username, site.name);
+                if (fs.existsSync(siteDir)) {
+                    const totalBytes = await calculateDirSize(siteDir);
+                    storageUsed = totalBytes / (1024 * 1024);
+                    await pool.execute('UPDATE sites SET storage_used = ? WHERE id = ?', [storageUsed, siteId]);
+                    recalculated = true;
+                }
+            }
+        }
+
+        res.json({
+            success: true,
+            siteId,
+            siteName: site.name,
+            storageUsedMB: parseFloat(storageUsed.toFixed(2)),
+            storageUsedFormatted: storageUsed < 1
+                ? `${(storageUsed * 1024).toFixed(0)} KB`
+                : `${storageUsed.toFixed(2)} MB`,
+            recalculated
+        });
+
+    } catch (e) {
+        res.status(500).json({ message: e.message });
     }
 };

@@ -62,16 +62,16 @@ export const getMockFiles = (framework: Framework): FileNode[] => {
 
 export const SAFE_COMMANDS: Record<string, TerminalAction[]> = {
   [Framework.LARAVEL]: [
-    { id: 'composer_install', label: 'Composer Install', command: '/usr/local/bin/php82 /usr/local/bin/composer install --no-interaction --prefer-dist --optimize-autoloader', description: 'Install PHP dependencies', isDangerous: false, executionMode: 'ssh' },
-    { id: 'npm_install', label: 'NPM Install', command: 'export PATH=/usr/local/bin:$PATH && npm install --legacy-peer-deps', description: 'Install Node.js dependencies', isDangerous: false, executionMode: 'ssh' },
-    { id: 'storage_link', label: 'Storage Link', command: '/usr/local/bin/php82 artisan storage:link', description: 'Create symbolic link for storage', isDangerous: false, executionMode: 'ssh' },
-    { id: 'npm_build', label: 'NPM Build', command: 'export PATH=/usr/local/bin:$PATH && npm run build', description: 'Build frontend assets', isDangerous: false, executionMode: 'ssh' },
-    { id: 'migrate', label: 'Run Migrations', command: 'php artisan migrate --force', description: 'Run database migrations (Windows local)', isDangerous: true, executionMode: 'local' },
-    { id: 'seed', label: 'Seed Database', command: 'php artisan db:seed --force', description: 'Populate database with seed data (Windows local)', isDangerous: true, executionMode: 'local' },
-    { id: 'cache_clear', label: 'Clear Cache', command: '/usr/local/bin/php82 artisan cache:clear', description: 'Flush the application cache', isDangerous: false, executionMode: 'ssh' },
-    { id: 'config_cache', label: 'Cache Config', command: '/usr/local/bin/php82 artisan config:cache', description: 'Cache configuration files', isDangerous: false, executionMode: 'ssh' },
-    { id: 'route_cache', label: 'Cache Routes', command: '/usr/local/bin/php82 artisan route:cache', description: 'Cache route definitions', isDangerous: false, executionMode: 'ssh' },
-    { id: 'view_clear', label: 'Clear Views', command: '/usr/local/bin/php82 artisan view:clear', description: 'Clear compiled view files', isDangerous: false, executionMode: 'ssh' },
+    { id: 'composer_install', label: 'Composer Install', command: 'composer install --no-interaction', description: 'Install PHP dependencies', isDangerous: false, executionMode: 'docker' },
+    { id: 'npm_install', label: 'NPM Install', command: 'npm install', description: 'Install Node.js dependencies', isDangerous: false, executionMode: 'docker' },
+    { id: 'storage_link', label: 'Storage Link', command: 'php artisan storage:link', description: 'Create symbolic link for storage', isDangerous: false, executionMode: 'docker' },
+    { id: 'npm_build', label: 'NPM Build', command: 'npm run build', description: 'Build frontend assets', isDangerous: false, executionMode: 'docker' },
+    { id: 'migrate', label: 'Run Migrations', command: 'php artisan migrate --force', description: 'Run database migrations', isDangerous: true, executionMode: 'docker' },
+    { id: 'seed', label: 'Seed Database', command: 'php artisan db:seed --force', description: 'Populate database with seed data', isDangerous: true, executionMode: 'docker' },
+    { id: 'cache_clear', label: 'Clear Cache', command: 'php artisan cache:clear', description: 'Flush the application cache', isDangerous: false, executionMode: 'docker' },
+    { id: 'config_cache', label: 'Cache Config', command: 'php artisan config:cache', description: 'Cache configuration files', isDangerous: false, executionMode: 'docker' },
+    { id: 'route_cache', label: 'Cache Routes', command: 'php artisan route:cache', description: 'Cache route definitions', isDangerous: false, executionMode: 'docker' },
+    { id: 'view_clear', label: 'Clear Views', command: 'php artisan view:clear', description: 'Clear compiled view files', isDangerous: false, executionMode: 'docker' },
   ],
   [Framework.NODEJS]: [
     { id: 'npm_install', label: 'Install Dependencies', command: 'npm install --production', description: 'Install packages from package.json', executionMode: 'ssh' },

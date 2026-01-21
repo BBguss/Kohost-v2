@@ -1,18 +1,30 @@
 /**
  * ============================================
- * FILE CONTROLLER - Stream-Based File Operations
+ * FILE CONTROLLER - cPanel-Style File Manager
  * ============================================
  * 
- * Semua operasi file menggunakan stream untuk:
- * - Mengurangi penggunaan memory
- * - Mendukung file besar
- * - Aman untuk multi-user environment
+ * Semua operasi file dengan fitur:
+ * - Path security (sandbox per user)
+ * - Extension whitelist/blacklist
+ * - Framework-aware validation
+ * - CRUD file & folder
+ * - Stream-based untuk file besar
  */
 
 const fs = require('fs');
 const fsp = require('fs').promises;
 const path = require('path');
 const { getSafePath } = require('../utils/helpers');
+const {
+    validatePath,
+    validateFileExtension,
+    validateExtensionForFramework,  // Framework-aware validation
+    isEditableForFramework,         // Framework-aware check
+    sanitizeFilename,
+    isEditableFile,
+    isBlockedFile,
+    getFileType
+} = require('../utils/fileManagerUtils');
 const pool = require('../db');
 
 /**
@@ -303,6 +315,15 @@ exports.saveContent = async (req, res) => {
             await fsp.mkdir(parentDir, { recursive: true });
         }
 
+        // Validate extension
+        const extValidation = validateFileExtension(name);
+        if (!extValidation.valid) {
+            return res.status(400).json({
+                message: extValidation.message,
+                status: extValidation.error
+            });
+        }
+
         // Write using stream
         await new Promise((resolve, reject) => {
             const writeStream = fs.createWriteStream(filePath);
@@ -317,5 +338,315 @@ exports.saveContent = async (req, res) => {
     } catch (e) {
         console.error('[FileController] saveContent error:', e);
         res.status(500).json({ message: e.message });
+    }
+};
+
+// ============================================
+// ENHANCED FILE MANAGER ENDPOINTS
+// ============================================
+
+/**
+ * LIST FILE TREE (Recursive)
+ * ==========================
+ * Menampilkan struktur file/folder secara recursive untuk file explorer
+ */
+exports.listTree = async (req, res) => {
+    const { siteId, maxDepth = 5 } = req.query;
+    if (!siteId) return res.status(400).json({ message: 'Missing siteId', status: 'error' });
+
+    try {
+        const [sites] = await pool.execute('SELECT * FROM sites WHERE id = ?', [siteId]);
+        if (sites.length === 0) return res.status(404).json({ message: 'Site not found', status: 'error' });
+        const site = sites[0];
+
+        const pathInfo = await getSafePath(site.user_id, site.name, '/');
+        if (!pathInfo) return res.status(403).json({ message: 'Invalid path', status: 'FORBIDDEN_PATH' });
+
+        if (!fs.existsSync(pathInfo.fullPath)) {
+            return res.json({ tree: [], status: 'success' });
+        }
+
+        // Recursive function to build tree
+        const buildTree = async (dirPath, currentDepth = 0) => {
+            if (currentDepth >= parseInt(maxDepth)) return [];
+
+            const items = await fsp.readdir(dirPath, { withFileTypes: true });
+            const tree = [];
+
+            for (const item of items) {
+                // Skip hidden files/folders and blocked files
+                if (item.name.startsWith('.')) continue;
+
+                const itemPath = path.join(dirPath, item.name);
+                const relativePath = path.relative(pathInfo.siteDir, itemPath).replace(/\\/g, '/');
+
+                // Check for symbolic links
+                try {
+                    const stats = await fsp.lstat(itemPath);
+                    if (stats.isSymbolicLink()) continue;
+                } catch (e) {
+                    continue;
+                }
+
+                if (item.isDirectory()) {
+                    const children = await buildTree(itemPath, currentDepth + 1);
+                    tree.push({
+                        name: item.name,
+                        type: 'folder',
+                        path: relativePath,
+                        children
+                    });
+                } else {
+                    const ext = path.extname(item.name).toLowerCase();
+                    const stats = await fsp.stat(itemPath);
+                    tree.push({
+                        name: item.name,
+                        type: 'file',
+                        path: relativePath,
+                        extension: ext,
+                        fileType: getFileType(item.name),
+                        editable: isEditableFile(item.name),
+                        size: stats.size,
+                        sizeFormatted: (stats.size / 1024).toFixed(2) + ' KB'
+                    });
+                }
+            }
+
+            // Sort: folders first, then files, alphabetically
+            tree.sort((a, b) => {
+                if (a.type === b.type) return a.name.localeCompare(b.name);
+                return a.type === 'folder' ? -1 : 1;
+            });
+
+            return tree;
+        };
+
+        const tree = await buildTree(pathInfo.fullPath);
+        res.json({ tree, status: 'success' });
+
+    } catch (e) {
+        console.error('[FileController] listTree error:', e);
+        res.status(500).json({ message: e.message, status: 'error' });
+    }
+};
+
+/**
+ * CREATE FILE
+ * ===========
+ * Membuat file baru dengan validasi extension
+ */
+exports.createFile = async (req, res) => {
+    const { siteId, path: targetPath, filename, content = '' } = req.body;
+
+    if (!siteId || !filename) {
+        return res.status(400).json({ message: 'Missing required fields', status: 'error' });
+    }
+
+    try {
+        const [sites] = await pool.execute('SELECT * FROM sites WHERE id = ?', [siteId]);
+        if (sites.length === 0) return res.status(404).json({ message: 'Site not found', status: 'error' });
+        const site = sites[0];
+
+        const pathInfo = await getSafePath(site.user_id, site.name, targetPath || '/');
+        if (!pathInfo) return res.status(403).json({ message: 'Invalid path', status: 'FORBIDDEN_PATH' });
+
+        // Sanitize filename
+        const safeFilename = sanitizeFilename(filename);
+        if (!safeFilename) {
+            return res.status(400).json({ message: 'Invalid filename', status: 'error' });
+        }
+
+        // Validate extension
+        const extValidation = validateFileExtension(safeFilename);
+        if (!extValidation.valid) {
+            return res.status(400).json({
+                message: extValidation.message,
+                status: extValidation.error
+            });
+        }
+
+        const filePath = path.join(pathInfo.fullPath, safeFilename);
+
+        // Validate path is within site directory
+        if (!filePath.startsWith(pathInfo.siteDir)) {
+            return res.status(403).json({ message: 'Access denied', status: 'FORBIDDEN_PATH' });
+        }
+
+        // Check if file already exists
+        if (fs.existsSync(filePath)) {
+            return res.status(409).json({ message: 'File already exists', status: 'error' });
+        }
+
+        // Ensure parent directory exists
+        if (!fs.existsSync(pathInfo.fullPath)) {
+            await fsp.mkdir(pathInfo.fullPath, { recursive: true });
+        }
+
+        // Create file
+        await fsp.writeFile(filePath, content, 'utf8');
+
+        console.log(`[FileController] ✅ File created: ${safeFilename}`);
+        res.json({
+            success: true,
+            status: 'success',
+            file: {
+                name: safeFilename,
+                path: path.relative(pathInfo.siteDir, filePath).replace(/\\/g, '/')
+            }
+        });
+
+    } catch (e) {
+        console.error('[FileController] createFile error:', e);
+        res.status(500).json({ message: e.message, status: 'error' });
+    }
+};
+
+/**
+ * OPEN FILE FOR EDITING
+ * =====================
+ * Membuka file teks untuk diedit (dengan validasi extension)
+ */
+exports.openFile = async (req, res) => {
+    const { siteId, path: filePath } = req.query;
+
+    if (!siteId || !filePath) {
+        return res.status(400).json({ message: 'Missing required fields', status: 'error' });
+    }
+
+    try {
+        const [sites] = await pool.execute('SELECT * FROM sites WHERE id = ?', [siteId]);
+        if (sites.length === 0) return res.status(404).json({ message: 'Site not found', status: 'error' });
+        const site = sites[0];
+
+        const pathInfo = await getSafePath(site.user_id, site.name, '/');
+        if (!pathInfo) return res.status(403).json({ message: 'Invalid access', status: 'FORBIDDEN_PATH' });
+
+        // Validate path
+        const pathValidation = validatePath(pathInfo.siteDir, filePath);
+        if (!pathValidation.valid) {
+            return res.status(403).json({
+                message: pathValidation.message,
+                status: pathValidation.error
+            });
+        }
+
+        const fullFilePath = pathValidation.resolvedPath;
+
+        // Check file exists
+        if (!fs.existsSync(fullFilePath)) {
+            return res.status(404).json({ message: 'File not found', status: 'FILE_NOT_FOUND' });
+        }
+
+        // Check it's a file, not directory
+        const stats = await fsp.stat(fullFilePath);
+        if (stats.isDirectory()) {
+            return res.status(400).json({ message: 'Cannot open directory', status: 'error' });
+        }
+
+        // Validate extension (FRAMEWORK-AWARE)
+        const filename = path.basename(fullFilePath);
+        const extValidation = validateExtensionForFramework(filename, site.framework);
+        if (!extValidation.valid) {
+            return res.status(400).json({
+                message: extValidation.message,
+                status: extValidation.error,
+                framework: extValidation.framework
+            });
+        }
+
+        // Check file size (max 5MB for editing)
+        const MAX_EDIT_SIZE = 5 * 1024 * 1024;
+        if (stats.size > MAX_EDIT_SIZE) {
+            return res.status(413).json({
+                message: 'File too large for editing (max 5MB)',
+                status: 'error'
+            });
+        }
+
+        // Read file content
+        const content = await fsp.readFile(fullFilePath, 'utf8');
+
+        res.json({
+            success: true,
+            status: 'success',
+            file: {
+                name: filename,
+                path: filePath,
+                content,
+                fileType: getFileType(filename),
+                size: stats.size,
+                editable: true
+            }
+        });
+
+    } catch (e) {
+        console.error('[FileController] openFile error:', e);
+        res.status(500).json({ message: e.message, status: 'error' });
+    }
+};
+
+/**
+ * SAVE FILE (with backup)
+ * =======================
+ * Menyimpan file dengan optional backup
+ */
+exports.saveFile = async (req, res) => {
+    const { siteId, path: filePath, content, createBackup = false } = req.body;
+
+    if (!siteId || !filePath || content === undefined) {
+        return res.status(400).json({ message: 'Missing required fields', status: 'error' });
+    }
+
+    try {
+        const [sites] = await pool.execute('SELECT * FROM sites WHERE id = ?', [siteId]);
+        if (sites.length === 0) return res.status(404).json({ message: 'Site not found', status: 'error' });
+        const site = sites[0];
+
+        const pathInfo = await getSafePath(site.user_id, site.name, '/');
+        if (!pathInfo) return res.status(403).json({ message: 'Invalid access', status: 'FORBIDDEN_PATH' });
+
+        // Validate path
+        const pathValidation = validatePath(pathInfo.siteDir, filePath);
+        if (!pathValidation.valid) {
+            return res.status(403).json({
+                message: pathValidation.message,
+                status: pathValidation.error
+            });
+        }
+
+        const fullFilePath = pathValidation.resolvedPath;
+        const filename = path.basename(fullFilePath);
+
+        // Validate extension (FRAMEWORK-AWARE)
+        const extValidation = validateExtensionForFramework(filename, site.framework);
+        if (!extValidation.valid) {
+            return res.status(400).json({
+                message: extValidation.message,
+                status: extValidation.error,
+                framework: extValidation.framework
+            });
+        }
+
+        // Create backup if requested and file exists
+        if (createBackup && fs.existsSync(fullFilePath)) {
+            const backupPath = `${fullFilePath}.backup.${Date.now()}`;
+            await fsp.copyFile(fullFilePath, backupPath);
+        }
+
+        // Ensure parent directory exists
+        const parentDir = path.dirname(fullFilePath);
+        if (!fs.existsSync(parentDir)) {
+            await fsp.mkdir(parentDir, { recursive: true });
+        }
+
+        // Write file
+        await fsp.writeFile(fullFilePath, content, 'utf8');
+
+        console.log(`[FileController] ✅ File saved: ${filename}`);
+        res.json({ success: true, status: 'success' });
+
+    } catch (e) {
+        console.error('[FileController] saveFile error:', e);
+        res.status(500).json({ message: e.message, status: 'error' });
     }
 };

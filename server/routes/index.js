@@ -7,6 +7,7 @@ const upload = require('../middleware/upload');
 const authController = require('../controllers/authController');
 const siteController = require('../controllers/siteController');
 const fileController = require('../controllers/fileController');
+const databaseController = require('../controllers/databaseController'); // NEW
 const adminController = require('../controllers/adminController');
 const ticketController = require('../controllers/ticketController');
 const paymentController = require('../controllers/paymentController');
@@ -34,20 +35,61 @@ router.post('/auth/resend-verification', authController.resendVerification);
 // GET /api/auth/check-verification/:userId
 router.get('/auth/check-verification/:userId', authController.checkVerificationStatus);
 
-// Database Routes (Specific Routes First)
+// ============================================
+// DATABASE MANAGEMENT ROUTES (KolabPanel DB Manager)
+// ============================================
+
+// Legacy routes (keep for backward compatibility)
 router.get('/sites/:siteId/db/tables', siteController.getDatabasetables);
-router.get('/sites/:siteId/db/schema', siteController.getDatabaseSchema); // NEW: Full Schema
+router.get('/sites/:siteId/db/schema', siteController.getDatabaseSchema);
 router.get('/sites/:siteId/db/tables/:tableName', siteController.getTableData);
 router.post('/sites/:siteId/db/create', siteController.createDatabase);
 router.delete('/sites/:siteId/db', siteController.dropDatabase);
 router.post('/sites/:siteId/db/import', upload.single('file'), siteController.importDatabase);
-router.get('/sites/:siteId/db/export', siteController.exportDatabase);
+
+// NEW: Enhanced Database Routes
+// Table Operations
+router.get('/db/:siteId/tables', databaseController.getTables);
+router.post('/db/:siteId/tables', databaseController.createTable);
+router.delete('/db/:siteId/tables/:tableName', databaseController.dropTable);
+router.put('/db/:siteId/tables/:tableName/rename', databaseController.renameTable);
+router.put('/db/:siteId/tables/:tableName/truncate', databaseController.truncateTable);
+
+// Row CRUD
+router.get('/db/:siteId/tables/:tableName/rows', databaseController.getRows);
+router.post('/db/:siteId/tables/:tableName/rows', databaseController.insertRow);
+router.put('/db/:siteId/tables/:tableName/rows/:id', databaseController.updateRow);
+router.delete('/db/:siteId/tables/:tableName/rows/:id', databaseController.deleteRow);
+router.post('/db/:siteId/tables/:tableName/bulk', databaseController.bulkOperation);
+
+// Column Operations
+router.get('/db/:siteId/tables/:tableName/columns', databaseController.getColumns);
+router.post('/db/:siteId/tables/:tableName/columns', databaseController.addColumn);
+router.put('/db/:siteId/tables/:tableName/columns/:columnName', databaseController.modifyColumn);
+router.delete('/db/:siteId/tables/:tableName/columns/:columnName', databaseController.dropColumn);
+
+// Index Operations
+router.post('/db/:siteId/tables/:tableName/indexes', databaseController.createIndex);
+router.delete('/db/:siteId/tables/:tableName/indexes/:indexName', databaseController.dropIndex);
+
+// Schema & ERD
+router.get('/db/:siteId/schema', databaseController.getFullSchema);
+router.get('/db/:siteId/erd', databaseController.getERDData);
+
+// Query & Export/Import
+router.post('/db/:siteId/query', databaseController.executeQuery);
+router.get('/db/:siteId/export', databaseController.exportDatabase);
+router.post('/db/:siteId/import', upload.single('file'), databaseController.importDatabase);
+
+console.log('[Routes] Database management routes registered');
 
 // Site Routes
 router.get('/sites', siteController.listSites);
 router.post('/sites/deploy', upload.single('file'), siteController.deploySite);
 router.put('/sites/:siteId', siteController.updateSite);
 router.delete('/sites/:siteId', siteController.deleteSite);
+router.get('/sites/:siteId/storage', siteController.getSiteStorage);           // NEW: Get storage info
+router.post('/sites/:siteId/storage/recalculate', siteController.recalculateStorage); // NEW: Recalculate storage
 
 router.get('/debug/site/:siteId', async (req, res) => {
     const pool = require('../db');
@@ -61,12 +103,16 @@ console.log('[Routes] Database routes registered');
 
 // File Manager Routes
 router.get('/files', fileController.listFiles);
+router.get('/files/tree', fileController.listTree);           // NEW: Recursive file tree
+router.get('/files/open', fileController.openFile);           // NEW: Open file for editing
+router.post('/files/save', fileController.saveFile);          // NEW: Save file (with backup option)
+router.post('/files/create', fileController.createFile);      // NEW: Create new file
 router.post('/files/folder', fileController.createFolder);
 router.post('/files/upload', upload.single('file'), fileController.uploadFile);
 router.delete('/files', fileController.deleteItem);
 router.put('/files/rename', fileController.renameItem);
-router.get('/files/content', fileController.getContent);
-router.post('/files/content', fileController.saveContent);
+router.get('/files/content', fileController.getContent);      // Legacy: for simple read
+router.post('/files/content', fileController.saveContent);    // Legacy: for simple save
 
 // Ticket / Support Routes
 router.post('/tickets', ticketController.createTicket);
@@ -154,5 +200,17 @@ router.put('/admin/apache/sites/:filename', (req, res) => res.json({ success: tr
 router.delete('/admin/apache/sites/:filename', (req, res) => res.json({ success: true }));
 router.get('/admin/apache/httpd', (req, res) => res.json({ content: '# Mock httpd.conf' }));
 router.post('/admin/apache/reload', (req, res) => res.json({ success: true }));
+
+// ============================================
+// TERMINAL ROUTES (Docker-based)
+// ============================================
+const terminalController = require('../controllers/terminalController');
+
+router.post('/terminal/start', terminalController.startTerminal);
+router.post('/terminal/stop', terminalController.stopTerminal);
+router.post('/terminal/exec', terminalController.execCommand);
+router.get('/terminal/status', terminalController.getStatus);
+
+console.log('[Routes] Terminal routes registered');
 
 module.exports = router;

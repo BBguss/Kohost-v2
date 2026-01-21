@@ -1,0 +1,134 @@
+/**
+ * WebTerminal Styles
+ */
+
+.web-terminal-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 400px;
+  background: #1e1e2e;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.terminal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: #181825;
+  border-bottom: 1px solid #313244;
+}
+
+.terminal-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #cdd6f4;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  transition: background-color 0.3s;
+}
+
+.status-dot.connected {
+  background: #a6e3a1;
+  box-shadow: 0 0 6px #a6e3a1;
+}
+
+.status-dot.disconnected {
+  background: #f38ba8;
+  box-shadow: 0 0 6px #f38ba8;
+}
+
+.terminal-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.terminal-btn {
+  padding: 4px 12px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+
+.terminal-btn.reconnect {
+  background: #89b4fa;
+  color: #1e1e2e;
+}
+
+.terminal-btn.reconnect:hover {
+  background: #b4befe;
+}
+
+.terminal-btn.close {
+  background: transparent;
+  color: #6c7086;
+  font-size: 18px;
+  padding: 2px 8px;
+}
+
+.terminal-btn.close:hover {
+  color: #f38ba8;
+  background: rgba(243, 139, 168, 0.1);
+}
+
+.terminal-error {
+  padding: 8px 12px;
+  background: rgba(243, 139, 168, 0.1);
+  color: #f38ba8;
+  font-size: 12px;
+  border-left: 3px solid #f38ba8;
+}
+
+.terminal-body {
+  flex: 1;
+  padding: 8px;
+}
+
+/* xterm overrides */
+.terminal-body .xterm {
+  padding: 8px;
+}
+
+.terminal-body .xterm-viewport {
+  overflow-y: auto !important;
+}
+
+.terminal-body .xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+
+.terminal-body .xterm-viewport::-webkit-scrollbar-track {
+  background: #181825;
+}
+
+.terminal-body .xterm-viewport::-webkit-scrollbar-thumb {
+  background: #45475a;
+  border-radius: 4px;
+}
+
+.terminal-body .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: #585b70;
+}
+
+/* Fullscreen mode */
+.web-terminal-container.fullscreen {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 9999;
+  border-radius: 0;
+}
