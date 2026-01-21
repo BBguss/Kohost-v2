@@ -630,6 +630,9 @@ exports.getStatus = async (req, res) => {
 // SOCKET.IO HANDLER
 // ============================================
 
+// Session state per socket - stores current working directory
+const sessionState = new Map(); // socketId -> { cwd: string, siteId: string }
+
 /**
  * Handle terminal connection via Socket.IO
  * Called from app.js when a socket connects
@@ -639,6 +642,9 @@ const handleTerminalConnection = (socket) => {
     const username = socket.user?.username || 'unknown';
 
     console.log(`[Terminal] User ${username} (${userId}) connected to terminal`);
+
+    // Initialize session state with default working directory
+    sessionState.set(socket.id, { cwd: '/workspace', siteId: null });
 
     // Start container when user connects
     if (userId) {
@@ -652,6 +658,12 @@ const handleTerminalConnection = (socket) => {
             socket.emit('terminal:error', { message: 'Failed to start container: ' + err.message });
         });
     }
+
+    // Cleanup session state on disconnect
+    socket.on('disconnect', () => {
+        console.log(`[Terminal] User ${username} disconnected from terminal`);
+        sessionState.delete(socket.id);
+    });
 
     // Handle command execution
     socket.on('terminal:command', async (data) => {
@@ -717,6 +729,7 @@ const handleTerminalConnection = (socket) => {
     // ============================================
     // FIXED: Now uses Docker container for execution, not local Windows spawn
     // This ensures php, node, npm, composer are available via container's PATH
+    // ALSO: Supports persistent working directory with cd command
     socket.on('execute_command', async (data) => {
         const { command, siteId } = data || {};
         console.log('══════════════════════════════════════════');
@@ -733,6 +746,34 @@ const handleTerminalConnection = (socket) => {
 
         const trimmedCmd = command.trim();
 
+        // Get or initialize session state
+        let session = sessionState.get(socket.id);
+        if (!session) {
+            session = { cwd: '/workspace', siteId: null };
+            sessionState.set(socket.id, session);
+        }
+
+        // Initialize working directory based on siteId (first time or siteId changed)
+        if (siteId && session.siteId !== siteId) {
+            session.siteId = siteId;
+            try {
+                // Query database to get site name (folder name)
+                const [sites] = await pool.execute(
+                    'SELECT name FROM sites WHERE id = ?',
+                    [siteId]
+                );
+                if (sites.length > 0 && sites[0].name) {
+                    session.cwd = `/workspace/${sites[0].name}`;
+                    console.log('[Terminal] 📂 Site folder from DB:', sites[0].name);
+                } else {
+                    session.cwd = `/workspace`;
+                }
+            } catch (dbErr) {
+                console.log('[Terminal] ⚠️ DB lookup failed:', dbErr.message);
+                session.cwd = `/workspace`;
+            }
+        }
+
         // Handle built-in commands without Docker
         if (trimmedCmd === 'help') {
             socket.emit('command_output', { 
@@ -743,7 +784,8 @@ const handleTerminalConnection = (socket) => {
                     '  npm, node, npx       - Node.js\n' +
                     '  php, composer        - PHP/Laravel\n' +
                     '  unzip, zip, tar      - Archive tools\n' +
-                    '  clear                - Clear screen\n\n',
+                    '  clear                - Clear screen\n' +
+                    '\nTip: Use "cd folder" to change directory persistently\n\n',
                 type: 'stdout' 
             });
             socket.emit('command_completed', { exitCode: 0 });
@@ -753,6 +795,84 @@ const handleTerminalConnection = (socket) => {
         if (trimmedCmd === 'clear') {
             socket.emit('terminal:clear');
             socket.emit('command_completed', { exitCode: 0 });
+            return;
+        }
+
+        // Handle 'pwd' to show current directory
+        if (trimmedCmd === 'pwd') {
+            socket.emit('command_output', { data: session.cwd + '\n', type: 'stdout' });
+            socket.emit('command_completed', { exitCode: 0 });
+            return;
+        }
+
+        // Handle 'cd' command - update session working directory
+        if (trimmedCmd.startsWith('cd ') || trimmedCmd === 'cd') {
+            const targetDir = trimmedCmd.substring(3).trim() || '/workspace';
+            
+            // Build the new path
+            let newCwd;
+            if (targetDir === '..') {
+                // Go up one directory
+                const parts = session.cwd.split('/').filter(p => p);
+                if (parts.length > 1) {
+                    parts.pop();
+                    newCwd = '/' + parts.join('/');
+                } else {
+                    newCwd = '/workspace';
+                }
+            } else if (targetDir === '~' || targetDir === '') {
+                newCwd = '/workspace';
+            } else if (targetDir.startsWith('/')) {
+                // Absolute path - but restrict to /workspace
+                if (targetDir.startsWith('/workspace')) {
+                    newCwd = targetDir;
+                } else {
+                    socket.emit('command_error', { error: 'Access denied: Can only navigate within /workspace' });
+                    return;
+                }
+            } else {
+                // Relative path
+                newCwd = session.cwd + '/' + targetDir;
+            }
+
+            // Normalize path (remove double slashes, trailing slash)
+            newCwd = newCwd.replace(/\/+/g, '/').replace(/\/$/, '') || '/workspace';
+
+            // Verify directory exists in container
+            const containerName = getContainerName(userId);
+            
+            console.log('[Terminal] 📁 CD command: target=', targetDir, 'newCwd=', newCwd);
+
+            try {
+                // Use spawn instead of exec for better handling
+                const result = await new Promise((resolve, reject) => {
+                    const checkProcess = spawn('docker', [
+                        'exec', containerName, 
+                        'test', '-d', newCwd
+                    ]);
+                    
+                    checkProcess.on('close', (code) => {
+                        resolve(code === 0 ? 'EXISTS' : 'NOT_FOUND');
+                    });
+                    
+                    checkProcess.on('error', (err) => {
+                        reject(err);
+                    });
+                });
+
+                console.log('[Terminal] 📁 CD check result:', result);
+
+                if (result === 'EXISTS') {
+                    session.cwd = newCwd;
+                    socket.emit('command_output', { data: `${newCwd}\n`, type: 'stdout' });
+                    socket.emit('command_completed', { exitCode: 0 });
+                } else {
+                    socket.emit('command_error', { error: `Directory not found: ${targetDir}` });
+                }
+            } catch (err) {
+                console.log('[Terminal] ❌ CD error:', err.message);
+                socket.emit('command_error', { error: `Failed to change directory: ${err.message}` });
+            }
             return;
         }
 
@@ -772,11 +892,9 @@ const handleTerminalConnection = (socket) => {
         // ============================================
         // DOCKER CONTAINER EXECUTION
         // ============================================
-        // Use the same Docker-based execution as terminal:command
-        // This ensures consistent environment with php, node, npm, composer available
-
         const containerName = getContainerName(userId);
         console.log('[Terminal] Container name:', containerName);
+        console.log('[Terminal] 📂 Session CWD:', session.cwd);
 
         try {
             // Ensure container is running
@@ -788,38 +906,10 @@ const handleTerminalConnection = (socket) => {
                 socket.emit('command_output', { data: '✓ Container ready\n', type: 'stderr' });
             }
 
-            // Determine working directory inside container
-            // Container mounts user storage to /workspace
-            // If siteId is provided, get the site name from database as folder
-            let workdir = '/workspace';
-            if (siteId && siteId !== '') {
-                try {
-                    // Query database to get site name (folder name)
-                    const [sites] = await pool.execute(
-                        'SELECT name FROM sites WHERE id = ?',
-                        [siteId]
-                    );
-                    if (sites.length > 0 && sites[0].name) {
-                        workdir = `/workspace/${sites[0].name}`;
-                        console.log('[Terminal] 📂 Site name from DB:', sites[0].name);
-                    } else {
-                        // Fallback: use siteId as folder name
-                        workdir = `/workspace/${siteId}`;
-                    }
-                } catch (dbErr) {
-                    console.log('[Terminal] ⚠️ DB lookup failed, using siteId as folder:', dbErr.message);
-                    workdir = `/workspace/${siteId}`;
-                }
-            }
-
-            // Build command that:
-            // 1. Changes to correct working directory
-            // 2. Executes the command with full PATH
-            // 3. Uses bash for proper shell features
-            const fullCommand = `cd "${workdir}" 2>/dev/null || cd /workspace; ${trimmedCmd}`;
+            // Build command with persistent working directory from session
+            const fullCommand = `cd "${session.cwd}" 2>/dev/null || cd /workspace; ${trimmedCmd}`;
 
             console.log('[Terminal] 🐳 Docker exec:', fullCommand);
-            console.log('[Terminal] 📂 Workdir:', workdir);
 
             // Execute in Docker container using spawn for streaming
             const dockerProcess = spawn('docker', [
@@ -855,7 +945,6 @@ const handleTerminalConnection = (socket) => {
             dockerProcess.on('close', (code) => {
                 console.log('[Terminal] ✅ Docker command finished with exit code:', code);
                 
-                // If no output was received, command might have failed silently
                 if (!hasOutput && code !== 0) {
                     socket.emit('command_output', { 
                         data: `Command finished with no output (exit code: ${code})\n`, 
@@ -876,7 +965,6 @@ const handleTerminalConnection = (socket) => {
             dockerProcess.on('error', (err) => {
                 console.log('[Terminal] ❌ Docker spawn error:', err.message);
                 
-                // Check if Docker is not running
                 if (err.message.includes('ENOENT') || err.message.includes('docker')) {
                     socket.emit('command_error', { 
                         error: '❌ Docker is not running. Please start Docker Desktop and try again.',
@@ -896,11 +984,7 @@ const handleTerminalConnection = (socket) => {
         }
     });
 
-    // Handle disconnect
-    socket.on('disconnect', () => {
-        console.log(`[Terminal] User ${username} disconnected from terminal`);
-        // Don't stop container on disconnect - it will timeout eventually
-    });
+    // Note: disconnect handler already added above with sessionState cleanup
 };
 
 // Export for WebSocket
