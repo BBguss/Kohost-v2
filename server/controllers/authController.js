@@ -3,10 +3,12 @@ const pool = require('../db');
 const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const path = require('path');
+const bcrypt = require('bcrypt'); // Import bcrypt
 const { AVATAR_ROOT } = require('../config/paths');
 const { sendVerificationEmail, sendPasswordResetEmail } = require('../services/emailService');
 
 const SECRET_KEY = process.env.JWT_SECRET || 'dev_secret_key';
+const SALT_ROUNDS = 10;
 
 // Helper to generate 6 digit code
 const generateCode = () => Math.floor(100000 + Math.random() * 900000).toString();
@@ -17,9 +19,10 @@ exports.login = async (req, res) => {
         const [users] = await pool.execute('SELECT * FROM users WHERE username = ?', [username]);
         const user = users[0];
         
-        if (user && user.password === password) {
+        // Compare input password with stored hash
+        if (user && await bcrypt.compare(password, user.password)) {
             const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, SECRET_KEY, { expiresIn: '12h' });
-            const { password, ...u } = user;
+            const { password, ...u } = user; // Exclude password from response
             res.json({ token, user: u });
         } else {
             res.status(401).json({ message: 'Invalid credentials' });
@@ -103,14 +106,17 @@ exports.register = async (req, res) => {
             return res.status(409).json({ message: 'Username or Email already exists' });
         }
 
+        // Hash Password
+        const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
+
         // Create User
         const userId = `u_${Date.now().toString(36)}`;
         await pool.execute(
             'INSERT INTO users (id, username, email, password, role, plan, status, avatar, theme) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [userId, username, email, password, 'USER', 'Basic', 'ACTIVE', `https://ui-avatars.com/api/?name=${username}`, 'light']
+            [userId, username, email, hashedPassword, 'USER', 'Basic', 'ACTIVE', `https://ui-avatars.com/api/?name=${username}`, 'light']
         );
 
-        // Create MySQL User
+        // Create MySQL User (System Logic remains same, passwords for MySQL users are handled by MySQL internal hashing via SQL)
         const mysqlUser = `sql_${safeUsername.toLowerCase()}`;
         const idPart = userId.substring(0, 4);
         const namePart = safeUsername.substring(0, 3).toUpperCase();
@@ -118,6 +124,7 @@ exports.register = async (req, res) => {
 
         try {
             await pool.query(`DROP USER IF EXISTS '${mysqlUser}'@'%'`);
+            // MySQL 8.0 uses caching_sha2_password by default, or mysql_native_password
             await pool.query(`CREATE USER '${mysqlUser}'@'%' IDENTIFIED BY '${mysqlPass}'`);
             await pool.query(`GRANT USAGE ON *.* TO '${mysqlUser}'@'%'`);
             await pool.query('FLUSH PRIVILEGES');
@@ -186,7 +193,10 @@ exports.confirmReset = async (req, res) => {
             return res.status(400).json({ message: 'Invalid or expired verification code' });
         }
 
-        await pool.execute('UPDATE users SET password = ? WHERE email = ?', [newPassword, email]);
+        // Hash new password
+        const hashedPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
+
+        await pool.execute('UPDATE users SET password = ? WHERE email = ?', [hashedPassword, email]);
         
         // Cleanup
         await pool.execute('DELETE FROM verifications WHERE email = ? AND type = "RESET"', [email]);
@@ -251,8 +261,15 @@ exports.changePassword = async (req, res) => {
         const [users] = await pool.execute('SELECT password FROM users WHERE id = ?', [userId]);
         if (users.length === 0) return res.status(404).json({ message: 'User not found' });
         
-        if (users[0].password === current) {
-            await pool.execute('UPDATE users SET password = ? WHERE id = ?', [newPass, userId]);
+        const user = users[0];
+
+        // Check if current password matches hash
+        const match = await bcrypt.compare(current, user.password);
+
+        if (match) {
+            // Hash new password
+            const hashedNewPass = await bcrypt.hash(newPass, SALT_ROUNDS);
+            await pool.execute('UPDATE users SET password = ? WHERE id = ?', [hashedNewPass, userId]);
             res.json({ success: true });
         } else {
             res.status(400).json({ message: 'Incorrect current password' });

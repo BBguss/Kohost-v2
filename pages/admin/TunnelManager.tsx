@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { Card } from '../../components/Shared';
 import { api } from '../../services/api';
 import { TunnelRoute } from '../../types';
-import { Cloud, Plus, RefreshCw, Trash2, Edit2, X, Loader2, Globe, Server, Search, AlertTriangle, ArrowUpDown, ChevronLeft, ChevronRight, Link, FileCode, Unlink, Save, CheckCircle, AlertOctagon, BarChart3, Activity, Network, Filter, ChevronDown } from 'lucide-react';
+import { Cloud, Plus, RefreshCw, Trash2, Edit2, X, Loader2, Globe, Server, Search, AlertTriangle, ArrowUpDown, ChevronLeft, ChevronRight, Link, FileCode, Unlink, Save, CheckCircle, AlertOctagon, BarChart3, Activity, Network, Filter, ChevronDown, ServerCrash } from 'lucide-react';
 import { BarChart, Bar, XAxis, CartesianGrid, Tooltip, ResponsiveContainer, YAxis } from 'recharts';
 
 const ITEMS_PER_PAGE = 15;
@@ -12,6 +12,7 @@ export const TunnelManager: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'ROUTES' | 'ZONES' | 'ANALYTICS'>('ROUTES');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [initError, setInitError] = useState<string | null>(null);
   
   // Data States
   const [routes, setRoutes] = useState<TunnelRoute[]>([]);
@@ -53,6 +54,7 @@ export const TunnelManager: React.FC = () => {
 
   const loadData = async () => {
     setLoading(true);
+    setInitError(null);
     try {
         if (activeTab === 'ROUTES') {
             // Fetch both routes and zones to populate the filter dropdown
@@ -74,8 +76,9 @@ export const TunnelManager: React.FC = () => {
             setAnalytics(analyticsData.data);
             setZones(zonesData);
         }
-    } catch (e) {
+    } catch (e: any) {
         console.error("Failed to load data", e);
+        setInitError(e.message || "Failed to connect to Cloudflare service");
     } finally {
         setLoading(false);
         setRefreshing(false);
@@ -199,6 +202,35 @@ export const TunnelManager: React.FC = () => {
   const paginatedItems = filteredItems.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE);
 
   const chartData = getFilteredAnalytics();
+
+  // --- RENDER ERROR STATE ---
+  if (initError) {
+      return (
+          <div className="space-y-6 animate-in fade-in duration-300">
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                  <div>
+                      <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                          <Cloud className="w-6 h-6 text-orange-500" /> Cloudflare Manager
+                      </h2>
+                  </div>
+              </div>
+              
+              <div className="flex flex-col items-center justify-center min-h-[400px] bg-white rounded-xl shadow-sm border border-slate-200 p-8 text-center">
+                  <div className="w-20 h-20 bg-red-50 rounded-full flex items-center justify-center mb-6 animate-in zoom-in duration-300">
+                      <ServerCrash className="w-10 h-10 text-red-500" />
+                  </div>
+                  <h3 className="text-xl font-bold text-slate-900 mb-2">Connection Failed</h3>
+                  <p className="text-slate-500 max-w-md mb-6">{initError}</p>
+                  <button 
+                      onClick={loadData}
+                      className="px-6 py-2 bg-indigo-600 text-white rounded-lg font-bold hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-200 flex items-center gap-2"
+                  >
+                      <RefreshCw className="w-4 h-4" /> Retry Connection
+                  </button>
+              </div>
+          </div>
+      );
+  }
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300 relative">

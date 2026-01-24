@@ -1,7 +1,6 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { UserRole, User, Domain, HostingPlan, Site, Framework, FileNode } from './types';
-import { MessageSquare, Loader2, AlertTriangle, RefreshCw, UserPlus, LogIn, Mail, Lock, User as UserIcon, ArrowRight, LayoutDashboard, ShieldCheck, Zap, Globe, Key, CheckCircle, ArrowLeft, Send, Check, X, AlertOctagon, Sparkles, Server } from 'lucide-react';
+import { MessageSquare, Loader2, AlertTriangle, RefreshCw, UserPlus, LogIn, Mail, Lock, User as UserIcon, ArrowRight, LayoutDashboard, ShieldCheck, Zap, Globe, Key, CheckCircle, ArrowLeft, Send, Check, X, AlertOctagon, Sparkles, Server, Eye, EyeOff } from 'lucide-react';
 
 // API
 import { api } from './services/api';
@@ -26,83 +25,114 @@ type ViewState = 'DASHBOARD' | 'CREATE_SITE' | 'FILES' | 'DATABASE' | 'BILLING' 
 type Theme = 'light' | 'dark';
 type AuthMode = 'LOGIN' | 'REGISTER' | 'FORGOT_PASSWORD';
 
-// --- BACKGROUND FRAME ANIMATOR COMPONENT ---
 const BackgroundFramePlayer = () => {
     const TOTAL_FRAMES = 160;
-    const FPS = 60; // Frames per second
-    const EXTS = ['jpg'];
+    const FPS = 60;
+    const PRELOAD_BUFFER = 5;
+    const PLACEHOLDER_IMAGE = '/assets/im/ezgif-frame-001.jpg'; // Frame pertama sebagai placeholder
+    
     const [currentFrame, setCurrentFrame] = useState(1);
-    const [candidateIndex, setCandidateIndex] = useState(0);
+    const [loadedImages, setLoadedImages] = useState<Record<number, string>>({});
+    const [isImageReady, setIsImageReady] = useState(false);
+    const [placeholderLoaded, setPlaceholderLoaded] = useState(false);
+    
     const intervalRef = useRef<number | null>(null);
-    const candidatesRef = useRef<Record<number, string[]>>({});
+    const imageCacheRef = useRef<Record<number, HTMLImageElement>>({});
 
     const pad3 = (n: number) => String(n).padStart(3, '0');
-
-    // Only attempt local filename patterns we own. Avoid plain unpadded numbers
-    // and remove any external fallback. This prevents accidental remote loads.
-    const buildCandidates = (frame: number) => {
-        const pad = pad3(frame);
-        const patterns = [
-            `ezgif-frame-${pad}`
-        ];
-
-        const urls: string[] = [];
-        for (const p of patterns) {
-            for (const ext of EXTS) {
-                urls.push(`/assets/im/${p}.${ext}`);
-            }
-        }
-        return urls;
+    
+    const getImageUrl = (frame: number) => {
+        return `/assets/im/ezgif-frame-${pad3(frame)}.jpg`;
     };
 
+    // Load placeholder image first
     useEffect(() => {
-        // Prebuild candidates and preload
-        for (let i = 1; i <= TOTAL_FRAMES; i++) {
-            const list = buildCandidates(i);
-            candidatesRef.current[i] = list;
-            for (const url of list) {
-                const img = new Image();
-                img.src = url;
-            }
-        }
+        const img = new Image();
+        img.onload = () => setPlaceholderLoaded(true);
+        img.src = PLACEHOLDER_IMAGE;
+    }, []);
 
+    // Preload specific frame
+    const preloadFrame = (frame: number) => {
+        if (imageCacheRef.current[frame] || loadedImages[frame]) return;
+        
+        const url = getImageUrl(frame);
+        const img = new Image();
+        
+        img.onload = () => {
+            imageCacheRef.current[frame] = img;
+            setLoadedImages(prev => ({ ...prev, [frame]: url }));
+        };
+        
+        img.onerror = () => {
+            console.warn(`Failed to load frame ${frame}`);
+        };
+        
+        img.src = url;
+    };
+
+    // Preload current and upcoming frames
+    useEffect(() => {
+        preloadFrame(currentFrame);
+        
+        for (let i = 1; i <= PRELOAD_BUFFER; i++) {
+            const nextFrame = currentFrame + i > TOTAL_FRAMES 
+                ? (currentFrame + i) - TOTAL_FRAMES 
+                : currentFrame + i;
+            preloadFrame(nextFrame);
+        }
+    }, [currentFrame]);
+
+    // Check if current frame is ready
+    useEffect(() => {
+        setIsImageReady(!!loadedImages[currentFrame]);
+    }, [currentFrame, loadedImages]);
+
+    // Start animation timer
+    useEffect(() => {
         intervalRef.current = window.setInterval(() => {
             setCurrentFrame(prev => (prev >= TOTAL_FRAMES ? 1 : prev + 1));
         }, 1000 / FPS);
 
         return () => {
-            if (intervalRef.current !== null) clearInterval(intervalRef.current);
+            if (intervalRef.current !== null) {
+                clearInterval(intervalRef.current);
+            }
         };
     }, []);
 
-    // Reset candidate index whenever frame changes
-    useEffect(() => setCandidateIndex(0), [currentFrame]);
-
-    const currentCandidates = candidatesRef.current[currentFrame] || buildCandidates(currentFrame);
-    const currentSrc = currentCandidates[candidateIndex] || '';
+    const currentSrc = loadedImages[currentFrame] || '';
 
     return (
         <div className="absolute inset-0 z-0 overflow-hidden bg-slate-900">
-            <img
-                key={`${currentFrame}-${candidateIndex}`}
-                src={currentSrc || 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=='}
-                alt="Background Animation"
-                className="w-full h-full object-cover transition-opacity duration-75"
-                onError={() => {
-                    // advance to next candidate; if none left, fallback to Unsplash
-                    const next = candidateIndex + 1;
-                    if (next < currentCandidates.length) {
-                        console.debug('[BG] trying next candidate', currentCandidates[next]);
-                        setCandidateIndex(next);
-                    } else {
-                            // all candidates failed; leave a tiny transparent placeholder
-                            // Do NOT load external images — keep everything local-only.
-                            setCandidateIndex(next);
-                        }
-                }}
-            />
-            {/* Overlay to ensure text readability (no backdrop blur to preserve image sharpness) */}
-            <div className="absolute inset-0 bg-white/30"></div>
+            {/* Placeholder image - always visible when frame not ready */}
+            {placeholderLoaded && !isImageReady && (
+                <img
+                    src={PLACEHOLDER_IMAGE}
+                    alt="Loading"
+                    className="absolute inset-0 w-full h-full object-cover"
+                />
+            )}
+            
+            {/* Fallback gray background if placeholder fails */}
+            {!placeholderLoaded && !isImageReady && (
+                <div className="absolute inset-0 bg-gradient-to-br from-slate-700 to-slate-900" />
+            )}
+            
+            {/* Main animated image */}
+            {currentSrc && (
+                <img
+                    key={currentFrame}
+                    src={currentSrc}
+                    alt="Background Animation"
+                    className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-100 ${
+                        isImageReady ? 'opacity-100' : 'opacity-0'
+                    }`}
+                />
+            )}
+            
+            {/* Overlay */}
+            <div className="absolute inset-0 bg-white/30" />
         </div>
     );
 };
@@ -123,6 +153,7 @@ const App: React.FC = () => {
   const [authForm, setAuthForm] = useState({ username: '', email: '', password: '' });
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   // Registration Flow State
   const [registerStep, setRegisterStep] = useState(1); // 1: Details, 2: OTP
@@ -133,6 +164,7 @@ const App: React.FC = () => {
   const [resetEmail, setResetEmail] = useState('');
   const [resetCode, setResetCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [showResetPassword, setShowResetPassword] = useState(false);
 
   // Feedback Modal State (Replaces Alerts)
   const [feedback, setFeedback] = useState<{
@@ -494,13 +526,13 @@ const App: React.FC = () => {
             </div>
         )}
 
-        {/* MAIN CONTAINER (GLASS EFFECT) */}
-        <div className="relative z-20 w-full max-w-5xl mx-4 min-h-[600px] bg-clip-padding backdrop-blur-sm bg-white/30 bg-opacity-60 rounded-3xl shadow-2xl overflow-hidden flex flex-col md:flex-row animate-in fade-in slide-in-from-bottom-8 duration-700 border border-gray-100 ring-1 ring-slate-200">
+        {/* MAIN CONTAINER (GLASS EFFECT - HIGH CONTRAST) */}
+        <div className="relative z-20 w-full max-w-5xl mx-4 min-h-[600px] bg-clip-padding backdrop-filter backdrop-blur-lg bg-white/20 border border-white/40 rounded-3xl shadow-2xl overflow-hidden flex flex-col md:flex-row animate-in fade-in slide-in-from-bottom-8 duration-700 ring-1 ring-white/30">
             
             {/* LEFT SIDE: Branding & Visuals (Vibrant Gradient) */}
             <div className="w-full md:w-1/2 p-8 md:p-12 flex flex-col justify-between relative overflow-hidden 
-    bg-gradient-to-br from-indigo-600 via-purple-600/50 to-indigo-800/50 
-    backdrop-blur-sm text-white">
+    bg-gradient-to-br from-indigo-700 via-purple-700/50 to-indigo-900/20 
+    backdrop-blur-sm text-white border-r border-white/10">
                 {/* Decorative Circles */}
                 <div className="absolute top-0 right-0 w-64 h-64 bg-white/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2 pointer-events-none"></div>
                 <div className="absolute bottom-0 left-0 w-48 h-48 bg-indigo-400/20 rounded-full blur-3xl translate-y-1/2 -translate-x-1/2 pointer-events-none"></div>
@@ -536,8 +568,8 @@ const App: React.FC = () => {
                 </div>
             </div>
 
-            {/* RIGHT SIDE: Form Interaction (White Background) */}
-            <div className="w-full md:w-1/2 p-8 md:p-12 bg-blue-600/10 backdrop-blur-md flex flex-col justify-center relative border-l border-white/10">
+            {/* RIGHT SIDE: Form Interaction (High Contrast White) */}
+            <div className="w-full md:w-1/2 p-8 md:p-12 bg-white/2 backdrop-blur-sm flex flex-col justify-center relative shadow-inner">
                 
                 <div className="w-full max-w-sm mx-auto space-y-8">
                     <div className="text-center md:text-left">
@@ -546,7 +578,7 @@ const App: React.FC = () => {
                                 ? (registerStep === 2 ? 'Verify Email' : 'Create Account') 
                                 : authMode === 'FORGOT_PASSWORD' ? 'Reset Password' : 'Welcome Back'}
                         </h2>
-                        <p className="text-slate-500 text-sm">
+                        <p className="text-slate-600 text-sm font-medium">
                             {authMode === 'REGISTER' 
                                 ? (registerStep === 2 ? `Check inbox for code.` : 'Join our community today.') 
                                 : authMode === 'FORGOT_PASSWORD' ? 'Recover your account access.' : 'Sign in to continue to your dashboard.'}
@@ -572,7 +604,7 @@ const App: React.FC = () => {
                                                 type="email" 
                                                 value={resetEmail}
                                                 onChange={e => setResetEmail(e.target.value)}
-                                                className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all text-slate-900 placeholder:text-slate-400"
+                                                className="w-full pl-10 pr-4 py-3 bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all text-slate-900 placeholder:text-slate-400 shadow-sm"
                                                 placeholder="Registered Email Address"
                                                 required
                                                 autoFocus
@@ -592,7 +624,7 @@ const App: React.FC = () => {
                                             type="text" 
                                             value={resetCode}
                                             onChange={e => setResetCode(e.target.value)}
-                                            className="w-full px-4 py-4 text-center text-3xl tracking-[0.5em] font-mono font-bold bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-slate-900 uppercase placeholder:text-slate-300"
+                                            className="w-full px-4 py-4 text-center text-3xl tracking-[0.5em] font-mono font-bold bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-slate-900 uppercase placeholder:text-slate-300 shadow-sm"
                                             placeholder="000000"
                                             maxLength={6}
                                             required
@@ -610,15 +642,22 @@ const App: React.FC = () => {
                                         <div className="relative group">
                                             <Key className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400 group-focus-within:text-indigo-600 transition-colors" />
                                             <input 
-                                                type="password" 
+                                                type={showResetPassword ? "text" : "password"}
                                                 value={newPassword}
                                                 onChange={e => setNewPassword(e.target.value)}
-                                                className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all text-slate-900 placeholder:text-slate-400"
+                                                className="w-full pl-10 pr-4 py-3 bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-slate-900 placeholder:text-slate-400 shadow-sm"
                                                 placeholder="New Secure Password"
                                                 required
                                                 minLength={6}
                                                 autoFocus
                                             />
+                                            <button 
+                                                type="button"
+                                                onClick={() => setShowResetPassword(!showResetPassword)}
+                                                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-indigo-600 transition-colors"
+                                            >
+                                                {showResetPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                                            </button>
                                         </div>
                                     </div>
                                     <button type="submit" disabled={authLoading} className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold shadow-lg transition-all flex items-center justify-center gap-2">
@@ -628,7 +667,7 @@ const App: React.FC = () => {
                             )}
 
                             {authError && (
-                                <div className="p-3 bg-red-50 border border-red-100 rounded-lg flex items-center gap-2 text-sm text-red-600 animate-in shake">
+                                <div className="p-3 bg-red-50 border border-red-200 rounded-lg flex items-center gap-2 text-sm text-red-600 animate-in shake font-medium">
                                     <AlertTriangle className="w-4 h-4 shrink-0" />
                                     {authError}
                                 </div>
@@ -655,7 +694,7 @@ const App: React.FC = () => {
                                                 type="text" 
                                                 value={registerCode}
                                                 onChange={e => setRegisterCode(e.target.value)}
-                                                className="w-full px-4 py-4 text-center text-3xl tracking-[0.5em] font-mono font-bold bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-slate-900 uppercase placeholder:text-slate-300"
+                                                className="w-full px-4 py-4 text-center text-3xl tracking-[0.5em] font-mono font-bold bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-slate-900 uppercase placeholder:text-slate-300 shadow-sm"
                                                 placeholder="000000"
                                                 maxLength={6}
                                                 required
@@ -673,7 +712,7 @@ const App: React.FC = () => {
                                                     type="text" 
                                                     value={authForm.username}
                                                     onChange={e => setAuthForm({...authForm, username: e.target.value})}
-                                                    className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all text-slate-900 placeholder:text-slate-400"
+                                                    className="w-full pl-10 pr-4 py-3 bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all text-slate-900 placeholder:text-slate-400 shadow-sm"
                                                     placeholder="Enter your username"
                                                     required
                                                 />
@@ -689,7 +728,7 @@ const App: React.FC = () => {
                                                         type="email" 
                                                         value={authForm.email}
                                                         onChange={e => setAuthForm({...authForm, email: e.target.value})}
-                                                        className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all text-slate-900 placeholder:text-slate-400"
+                                                        className="w-full pl-10 pr-4 py-3 bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all text-slate-900 placeholder:text-slate-400 shadow-sm"
                                                         placeholder="name@example.com"
                                                         required
                                                     />
@@ -713,20 +752,27 @@ const App: React.FC = () => {
                                             <div className="relative group">
                                                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400 group-focus-within:text-indigo-600 transition-colors" />
                                                 <input 
-                                                    type="password" 
+                                                    type={showResetPassword ? "text" : "password"} 
                                                     value={authForm.password}
                                                     onChange={e => setAuthForm({...authForm, password: e.target.value})}
-                                                    className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all text-slate-900 placeholder:text-slate-400"
+                                                    className="w-full pl-10 pr-4 py-3 bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all text-slate-900 placeholder:text-slate-400 shadow-sm"
                                                     placeholder="••••••••"
                                                     required
                                                 />
+                                                <button 
+                                                type="button"
+                                                onClick={() => setShowResetPassword(!showResetPassword)}
+                                                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-indigo-600 transition-colors"
+                                            >
+                                                {showResetPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                                            </button>
                                             </div>
                                         </div>
                                     </>
                                 )}
 
                                 {authError && (
-                                    <div className="p-3 bg-red-50 border border-red-100 rounded-lg flex items-center gap-2 text-sm text-red-600 animate-in shake">
+                                    <div className="p-3 bg-red-50 border border-red-200 rounded-lg flex items-center gap-2 text-sm text-red-600 animate-in shake font-medium">
                                         <AlertTriangle className="w-4 h-4 shrink-0" />
                                         {authError}
                                     </div>
@@ -737,7 +783,7 @@ const App: React.FC = () => {
                                         <button 
                                             type="button"
                                             onClick={() => { setRegisterStep(1); setAuthError(''); }}
-                                            className="px-4 py-3 bg-slate-100 text-slate-600 border border-slate-200 hover:bg-slate-200 rounded-xl font-bold transition-colors"
+                                            className="px-4 py-3 bg-slate-100 text-slate-600 border border-slate-200 hover:bg-slate-200 rounded-xl font-bold transition-colors shadow-sm"
                                         >
                                             <ArrowLeft className="w-5 h-5" />
                                         </button>
@@ -754,7 +800,7 @@ const App: React.FC = () => {
                             </form>
 
                             <div className="text-center pt-4">
-                                <p className="text-sm text-slate-500">
+                                <p className="text-sm text-slate-500 font-medium">
                                     {authMode === 'REGISTER' ? "Already have an account?" : "Don't have an account?"}{' '}
                                     <button 
                                         onClick={() => { 
@@ -768,38 +814,6 @@ const App: React.FC = () => {
                                     </button>
                                 </p>
                             </div>
-                            
-                            {/* QUICK ACCESS (DEMO) */}
-                            {authMode === 'LOGIN' && (
-                                <div className="mt-6 pt-6 border-t border-slate-100">
-                                    <p className="text-[10px] text-center text-slate-400 uppercase tracking-widest mb-4 font-bold">Demo Access</p>
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div 
-                                            onClick={() => setAuthForm({ ...authForm, username: 'demo_user', password: 'password' })}
-                                            className="p-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-indigo-50 hover:border-indigo-300 cursor-pointer transition-all group flex flex-col items-center text-center gap-2"
-                                        >
-                                            <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 group-hover:bg-indigo-600 group-hover:text-white transition-colors">
-                                                <Globe className="w-4 h-4" />
-                                            </div>
-                                            <div>
-                                                <h4 className="text-xs font-bold text-slate-700 group-hover:text-indigo-700">User Demo</h4>
-                                            </div>
-                                        </div>
-
-                                        <div 
-                                            onClick={() => setAuthForm({ ...authForm, username: 'sys_admin', password: 'admin' })}
-                                            className="p-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-purple-50 hover:border-purple-300 cursor-pointer transition-all group flex flex-col items-center text-center gap-2"
-                                        >
-                                            <div className="w-8 h-8 rounded-full bg-purple-100 flex items-center justify-center text-purple-600 group-hover:bg-purple-600 group-hover:text-white transition-colors">
-                                                <ShieldCheck className="w-4 h-4" />
-                                            </div>
-                                            <div>
-                                                <h4 className="text-xs font-bold text-slate-700 group-hover:text-purple-700">Admin Demo</h4>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
                         </>
                     )}
                 </div>

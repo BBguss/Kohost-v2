@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { Card } from '../../components/Shared';
 import { api } from '../../services/api';
-import { FileCode, Settings, RefreshCw, Plus, Trash2, Edit2, Save, X, Loader2, AlertTriangle, CheckCircle, AlertOctagon, Search, ChevronLeft, ChevronRight, FileText, Globe } from 'lucide-react';
+import { FileCode, Settings, RefreshCw, Plus, Trash2, Edit2, Save, X, Loader2, AlertTriangle, CheckCircle, AlertOctagon, Search, ChevronLeft, ChevronRight, FileText, Globe, ServerCrash } from 'lucide-react';
 
 const ITEMS_PER_PAGE = 25;
 
@@ -14,6 +14,7 @@ interface HostEntry {
 export const ApacheManager: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'SITES' | 'HTTPD' | 'HOSTS'>('SITES');
   const [loading, setLoading] = useState(true);
+  const [initError, setInitError] = useState<string | null>(null);
   
   // Data State
   const [sites, setSites] = useState<string[]>([]);
@@ -58,6 +59,7 @@ export const ApacheManager: React.FC = () => {
 
   const loadData = async () => {
     setLoading(true);
+    setInitError(null);
     try {
         if (activeTab === 'SITES') {
             const data = await api.admin.apache.listSites();
@@ -79,8 +81,9 @@ export const ApacheManager: React.FC = () => {
             });
             setHostsEntries(entries);
         }
-    } catch (e) {
+    } catch (e: any) {
         console.error("Failed to load apache data", e);
+        setInitError(e.message || "Failed to connect to Apache service");
     } finally {
         setLoading(false);
     }
@@ -215,6 +218,35 @@ export const ApacheManager: React.FC = () => {
   const totalItems = filteredItems.length;
   const totalPages = Math.ceil(totalItems / ITEMS_PER_PAGE);
   const paginatedItems = filteredItems.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE);
+
+  // --- RENDER ERROR STATE ---
+  if (initError) {
+      return (
+          <div className="space-y-6 animate-in fade-in duration-300">
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                  <div>
+                      <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                          <Settings className="w-6 h-6 text-indigo-600" /> Apache Configuration
+                      </h2>
+                  </div>
+              </div>
+              
+              <div className="flex flex-col items-center justify-center min-h-[400px] bg-white rounded-xl shadow-sm border border-slate-200 p-8 text-center">
+                  <div className="w-20 h-20 bg-red-50 rounded-full flex items-center justify-center mb-6 animate-in zoom-in duration-300">
+                      <ServerCrash className="w-10 h-10 text-red-500" />
+                  </div>
+                  <h3 className="text-xl font-bold text-slate-900 mb-2">Connection Failed</h3>
+                  <p className="text-slate-500 max-w-md mb-6">{initError}</p>
+                  <button 
+                      onClick={loadData}
+                      className="px-6 py-2 bg-indigo-600 text-white rounded-lg font-bold hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-200 flex items-center gap-2"
+                  >
+                      <RefreshCw className="w-4 h-4" /> Retry Connection
+                  </button>
+              </div>
+          </div>
+      );
+  }
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300 relative">

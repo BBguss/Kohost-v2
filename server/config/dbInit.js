@@ -2,25 +2,8 @@
 const mysql = require('mysql2/promise');
 const fs = require('fs');
 const path = require('path');
+const bcrypt = require('bcrypt'); // Import for hashing seed data
 require('dotenv').config();
-
-const SEED_SQL = `
-  INSERT IGNORE INTO users (id, username, password, email, role, plan, avatar, status) VALUES 
-  ('u1', 'demo_user', 'password', 'user@example.com', 'USER', 'Basic', '', 'ACTIVE'),
-  ('a1', 'sys_admin', 'admin', 'admin@kolabpanel.com', 'ADMIN', 'Premium', '', 'ACTIVE');
-
-  INSERT IGNORE INTO plans (id, name, price, currency, features, limits, is_popular) VALUES 
-  ('plan_basic', 'Basic', 0, 'Rp', '["1 Site", "100MB Storage", "Shared Database"]', '{"sites": 1, "storage": 100, "databases": 0}', FALSE),
-  ('plan_pro', 'Pro', 50000, 'Rp', '["5 Sites", "1GB Storage", "Private Database"]', '{"sites": 5, "storage": 1024, "databases": 1}', TRUE),
-  ('plan_premium', 'Premium', 100000, 'Rp', '["Unlimited Sites", "10GB Storage"]', '{"sites": 9999, "storage": 10240, "databases": 5}', FALSE);
-
-  INSERT IGNORE INTO domains (id, name, is_primary) VALUES ('d1', 'kolabpanel.com', TRUE);
-
-  INSERT IGNORE INTO tunnels (hostname, service) VALUES 
-  ('api.kolabpanel.com', 'http://127.0.0.1:5000'),
-  ('app.kolabpanel.com', 'http://127.0.0.1:3000'),
-  ('db.kolabpanel.com', 'http://127.0.0.1:3306');
-`;
 
 const initDB = async () => {
   console.log('[DB] Starting Database Initialization...');
@@ -51,7 +34,6 @@ const initDB = async () => {
     await rootConnection.query('SET FOREIGN_KEY_CHECKS = 0');
 
     // 2. Load Schema (Tables)
-    // Manually ensure critical tables exist if schema.sql isn't read
     
     // Verifications Table (For Auth)
     await rootConnection.query(`
@@ -75,6 +57,15 @@ const initDB = async () => {
           db_name VARCHAR(255),
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+
+    // Ensure Settings Table exists
+    await rootConnection.query(`
+        CREATE TABLE IF NOT EXISTS settings (
+          setting_key VARCHAR(50) PRIMARY KEY,
+          setting_value TEXT,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
 
@@ -113,10 +104,32 @@ const initDB = async () => {
     try {
         const [rows] = await rootConnection.query('SELECT COUNT(*) as count FROM users');
         if (rows[0].count === 0) {
+            // Hash default passwords for seeding
+            const userPass = await bcrypt.hash('password', 10);
+            const adminPass = await bcrypt.hash('admin', 10);
+
+            const SEED_SQL = `
+              INSERT IGNORE INTO users (id, username, password, email, role, plan, avatar, status) VALUES 
+              ('u1', 'demo_user', '${userPass}', 'user@example.com', 'USER', 'Basic', '', 'ACTIVE'),
+              ('a1', 'sys_admin', '${adminPass}', 'admin@kolabpanel.com', 'ADMIN', 'Premium', '', 'ACTIVE');
+
+              INSERT IGNORE INTO plans (id, name, price, currency, features, limits, is_popular) VALUES 
+              ('plan_basic', 'Basic', 0, 'Rp', '["1 Site", "100MB Storage", "Shared Database"]', '{"sites": 1, "storage": 100, "databases": 0}', FALSE),
+              ('plan_pro', 'Pro', 50000, 'Rp', '["5 Sites", "1GB Storage", "Private Database"]', '{"sites": 5, "storage": 1024, "databases": 1}', TRUE),
+              ('plan_premium', 'Premium', 100000, 'Rp', '["Unlimited Sites", "10GB Storage"]', '{"sites": 9999, "storage": 10240, "databases": 5}', FALSE);
+
+              INSERT IGNORE INTO domains (id, name, is_primary) VALUES ('d1', 'kolabpanel.com', TRUE);
+
+              INSERT IGNORE INTO tunnels (hostname, service) VALUES 
+              ('api.kolabpanel.com', 'http://127.0.0.1:5000'),
+              ('app.kolabpanel.com', 'http://127.0.0.1:3000'),
+              ('db.kolabpanel.com', 'http://127.0.0.1:3306');
+            `;
+
             await rootConnection.query(SEED_SQL);
-            console.log('[DB] Seed data inserted.');
+            console.log('[DB] Seed data inserted with hashed passwords.');
         }
-    } catch(err) { console.warn("[DB] Skipping seed (tables might not be ready)"); }
+    } catch(err) { console.warn("[DB] Skipping seed (tables might not be ready or hash error)", err); }
 
     // 6. Data Consistency Check
     try {

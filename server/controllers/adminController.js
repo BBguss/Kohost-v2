@@ -3,6 +3,7 @@ const pool = require('../db');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
+const bcrypt = require('bcrypt'); // Import bcrypt
 const { APACHE_SITES_PATH, APACHE_HTTPD_PATH } = require('../config/paths');
 const { getCpuUsage } = require('../utils/helpers');
 const { createNotification } = require('../utils/notification');
@@ -160,9 +161,13 @@ exports.createUser = async (req, res) => {
     const { username, email, password, role, plan } = req.body;
     try {
         const id = `u_${Date.now()}`;
+        
+        // Hash Password before inserting
+        const hashedPassword = await bcrypt.hash(password, 10);
+
         await pool.execute(
             'INSERT INTO users (id, username, email, password, role, plan, status, avatar, theme) VALUES (?, ?, ?, ?, ?, ?, "ACTIVE", ?, "light")',
-            [id, username, email, password, role, plan, `https://ui-avatars.com/api/?name=${username}`]
+            [id, username, email, hashedPassword, role, plan, `https://ui-avatars.com/api/?name=${username}`]
         );
         res.json({ success: true, id });
     } catch (e) { res.status(500).json({message: e.message}); }
